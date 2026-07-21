@@ -305,6 +305,7 @@ class YoloApp(rumps.App):
             rumps.MenuItem("Open Window", callback=self.open_window),
             rumps.MenuItem("Open Log", callback=self.open_log),
             rumps.MenuItem("Test Auto-Approve", callback=self.test_auto),
+            rumps.MenuItem("Enable Notifications", callback=self.enable_notifications),
             rumps.MenuItem("Fix Permissions…", callback=self.open_privacy),
             None,
             self.auto_item,
@@ -460,6 +461,36 @@ class YoloApp(rumps.App):
                 source="watcher", project="YOLO Mode",
                 detail="Grant Accessibility + Automation in System Settings.",
             )
+
+    def enable_notifications(self, _):
+        """Ask macOS for notification permission and log what it says.
+
+        Kept as an explicit action because the answer is informative: macOS
+        refuses this app outright unless it is notarized, and the refusal is
+        otherwise invisible.
+        """
+        def run():
+            try:
+                from UserNotifications import (
+                    UNAuthorizationOptionAlert,
+                    UNAuthorizationOptionSound,
+                    UNUserNotificationCenter,
+                )
+
+                centre = UNUserNotificationCenter.currentNotificationCenter()
+                centre.requestAuthorizationWithOptions_completionHandler_(
+                    UNAuthorizationOptionAlert | UNAuthorizationOptionSound,
+                    lambda granted, err: eventlog.record(
+                        "system" if granted else "error",
+                        f"Notification permission {'granted' if granted else 'refused'}",
+                        source="watcher", project="YOLO Mode",
+                        detail=str(err) if err else "",
+                    ),
+                )
+            except Exception as e:
+                eventlog.log(f"notification request failed: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def open_privacy(self, _):
         """Auto-approval needs Accessibility; clicking needs Automation too."""

@@ -93,7 +93,11 @@ cat > "$PLIST" <<PLISTEOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$APP/Contents/MacOS/YOLOMode</string>
+    <string>/usr/bin/open</string>
+    <string>-W</string>
+    <string>-a</string>
+    <string>$APP</string>
+    <string>--args</string>
     <string>$APP_PY</string>
   </array>
   <key>RunAtLoad</key><true/>
