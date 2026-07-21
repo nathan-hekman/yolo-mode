@@ -133,11 +133,15 @@ missing alert is diagnosable without guessing.
 
 ## Status
 
-The alerting, session naming, deep link, panel, window and logging all work and
-are in daily use. Auto-approval clicks are **not yet verified end to end** — the
-watcher matches the dialog and locates its Allow button, but a click has not
-been observed completing. Run *Test Auto-Approve* and check
-`~/Library/Logs/yolo-mode.log` before trusting it.
+Alerting, session naming, the deep link, the panel, the window, logging and
+auto-approval all work. Auto-approval is verified end to end: *Test
+Auto-Approve* raises a real dialog and the log records `auto-approved`.
+
+Native Notification Center posts do **not** work. macOS refuses them from this
+app whether it is unsigned, ad-hoc signed, or signed with an Apple Development
+certificate — a notarized build (or an embedded provisioning profile) appears
+to be required. The floating panel covers the same ground without asking
+permission for anything.
 
 ## Why "YOLO"
 
