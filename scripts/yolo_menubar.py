@@ -56,6 +56,8 @@ from AppKit import (  # noqa: E402
 from Foundation import NSMutableAttributedString, NSObject  # noqa: E402
 
 SHOW_FLAG = Path.home() / ".yolo_mode_show"
+NOTIFY_FLAG = Path.home() / ".yolo_mode_notify_test"
+OUT_LOG = Path.home() / "Library/Logs/yolo-mode.out.log"
 
 # The menubar wears the brand: the name is the status.
 TITLE_ARMED = "YOLO"
@@ -359,6 +361,11 @@ class YoloApp(rumps.App):
         if SHOW_FLAG.exists():
             SHOW_FLAG.unlink(missing_ok=True)
             self.open_window(None)
+        # Same trick for the notification check, so a reinstall can verify it
+        # from a script instead of asking someone to find a menu item.
+        if NOTIFY_FLAG.exists():
+            NOTIFY_FLAG.unlink(missing_ok=True)
+            self.enable_notifications(None)
         pushed, total = _todays_counts()
         self.status_item.title = "Status: paused" if self.paused else "Status: armed"
         self.pause_item.title = "Resume" if self.paused else "Pause"
@@ -576,7 +583,25 @@ def _brand():
         pass
 
 
+def _capture_output():
+    """Send stdout and stderr to the log file ourselves.
+
+    The LaunchAgent runs `open -a`, so launchd's StandardOutPath captures
+    `open`'s output, not the app's -- LaunchServices starts the app as a
+    separate process with its own descriptors. Tracebacks were vanishing.
+    """
+    try:
+        OUT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(OUT_LOG, "a", buffering=1)
+        os.dup2(fh.fileno(), sys.stdout.fileno())
+        os.dup2(fh.fileno(), sys.stderr.fileno())
+        print(f"--- started {datetime.now():%Y-%m-%d %H:%M:%S} ---")
+    except Exception as e:
+        eventlog.log(f"could not capture output: {e}")
+
+
 if __name__ == "__main__":
+    _capture_output()
     # Regular activation policy puts the app in the Dock and Cmd-Tab; a plain
     # rumps app is menubar-only.
     NSApplication.sharedApplication().setActivationPolicy_(

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Notarization requires the hardened runtime, and the hardened runtime's
+       default rule is library validation: load only code signed by this team.
+       The bundle's executable is a copied Homebrew Python whose Contents/lib
+       points at a venv full of third-party extension modules (Quartz, rumps,
+       requests) signed by other teams or not at all. Without this exemption
+       macOS refuses to launch the app at all. -->
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <!-- CPython compiles and writes executable pages at runtime. -->
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <!-- Reads PYTHONPATH and friends, which the runtime otherwise strips. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+</dict>
+</plist>

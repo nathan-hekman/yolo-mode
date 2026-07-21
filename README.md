@@ -127,9 +127,17 @@ missing alert is diagnosable without guessing.
 - Don't gate a Claude alert on finding a pending `tool_use` in the transcript.
   The assistant turn is written after the tool completes, so at prompt time the
   block is often not on disk yet.
-- Notification Center refuses posts from this app (`"Notifications are not
-  allowed for this application"`) unless it is notarized. The floating panel
-  exists for that reason.
+- The bundle must be self-contained. `Contents/lib` used to be a symlink to the
+  venv, which made Gatekeeper reject the whole app ("invalid destination for
+  symbolic link in bundle") -- anyone who can write the target swaps the app's
+  code without breaking its signature. Copy the libraries in instead.
+- Compile the bytecode caches before signing. Python validates a `.pyc` against
+  its source's mtime, copying resets those, and the first run then rewrites
+  hundreds of files inside a signed bundle: "a sealed resource is missing or
+  invalid".
+- Re-signing with a different certificate voids the Accessibility grant, and
+  auto-approval stops clicking until it is granted again. The log says so at
+  startup: `accessibility MISSING - cannot click`.
 
 ## Status
 
@@ -137,11 +145,26 @@ Alerting, session naming, the deep link, the panel, the window, logging and
 auto-approval all work. Auto-approval is verified end to end: *Test
 Auto-Approve* raises a real dialog and the log records `auto-approved`.
 
-Native Notification Center posts do **not** work. macOS refuses them from this
-app whether it is unsigned, ad-hoc signed, or signed with an Apple Development
-certificate — a notarized build (or an embedded provisioning profile) appears
-to be required. The floating panel covers the same ground without asking
-permission for anything.
+Native Notification Center posts do **not** work, and the cause is not this
+app. Every request comes back `UNErrorDomain Code=1, "Notifications are not
+allowed for this application"` — instantly, before the request reaches the
+notification daemon, which logs nothing.
+
+The evidence, on the machine this was built on:
+
+- A 20-line compiled Objective-C app, signed with the same Developer ID and
+  accepted by Gatekeeper, is refused the same way.
+- `terminal-notifier` posts nothing either.
+- `~/Library/Preferences/com.apple.ncprefs.plist`, the list macOS keeps of
+  every app that has asked, holds 62 entries and **not one is third-party** —
+  no browser, no chat app, nothing. It was last modified 2026-06-04.
+
+So no third-party app on that Mac can register for notifications, and the fix
+is a system one (repair or rebuild `ncprefs`), not a code one. The floating
+panel covers the same ground and asks permission for nothing.
+
+Signing is still worth doing properly, and now is: Developer ID, hardened
+runtime, self-contained bundle, `spctl` verdict `accepted`.
 
 ## Why "YOLO"
 

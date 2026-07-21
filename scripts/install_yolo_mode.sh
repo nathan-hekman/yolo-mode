@@ -43,8 +43,22 @@ GUI_PY="$(dirname "$(dirname "$REAL_PY")")/Resources/Python.app/Contents/MacOS/P
 cp "$GUI_PY" "$APP/Contents/MacOS/YOLOMode"
 cp "$REPO_DIR/.venv/pyvenv.cfg" "$APP/Contents/MacOS/pyvenv.cfg"
 # Python takes Contents/ as the venv root (pyvenv.cfg sits one level below it),
-# so point Contents/lib at the real venv's libraries.
-ln -sfn "$REPO_DIR/.venv/lib" "$APP/Contents/lib"
+# so Contents/lib must hold the venv's libraries.
+#
+# Copy them (~50MB), don't symlink. A symlink pointing outside the bundle makes
+# Gatekeeper reject the whole app -- "invalid destination for symbolic link in
+# bundle" -- because anyone who can write the target swaps the app's code
+# without breaking its signature. A rejected bundle is not a valid app, and
+# Notification Center refuses to talk to one.
+rm -rf "$APP/Contents/lib"
+cp -R "$REPO_DIR/.venv/lib" "$APP/Contents/lib"
+# Compile the bytecode caches now, before signing. Python validates a .pyc
+# against its source's mtime, and copying gives every file a new one -- so the
+# first run would rewrite hundreds of .pyc files inside the bundle and break
+# its own seal ("a sealed resource is missing or invalid"). Precompiled, the
+# caches already match and the running app never writes into itself.
+find "$APP/Contents/lib" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+"$VENV_PY" -m compileall -q "$APP/Contents/lib" >/dev/null 2>&1 || true
 
 cat > "$APP/Contents/Info.plist" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,6 +72,9 @@ cat > "$APP/Contents/Info.plist" <<PLISTEOF
   <key>CFBundleIconFile</key><string>appicon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>2.0</string>
+  <!-- Notification Center refuses an app with no CFBundleVersion outright,
+       before it even reaches the notification daemon. -->
+  <key>CFBundleVersion</key><string>2</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
@@ -70,14 +87,23 @@ PLISTEOF
 # to the signature, so an unsigned bundle loses those permissions on every
 # reinstall and auto-approval silently stops working.
 #
-# No hardened runtime (-o runtime): it makes Gatekeeper refuse to launch this
-# bundle ("YOLOMode cannot be opened because of a problem"), because the
-# executable is a copied Homebrew Python that the runtime then rejects.
-SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -1 | awk '{print $2}')"
-[ -n "$SIGN_ID" ] || SIGN_ID="-"
-codesign --force --deep -s "$SIGN_ID" "$APP" 2>/dev/null \
-  || codesign --force --deep -s - "$APP" 2>/dev/null \
-  || echo "WARN: could not sign the bundle"
+# Prefer Developer ID: Notification Center refuses posts from an app signed
+# only for development. Developer ID means the hardened runtime, which needs
+# the entitlements alongside this script -- a copied Homebrew Python cannot
+# launch under the runtime's default library validation. Fall back to Apple
+# Development (no runtime, no notifications) and then ad-hoc.
+ENTS="$REPO_DIR/scripts/yolo_mode.entitlements"
+SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" | head -1 | awk '{print $2}')"
+if [ -n "$SIGN_ID" ]; then
+  codesign --force --deep --timestamp -o runtime --entitlements "$ENTS" \
+    -s "$SIGN_ID" "$APP" || { echo "ERROR: Developer ID signing failed"; exit 1; }
+else
+  SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -1 | awk '{print $2}')"
+  [ -n "$SIGN_ID" ] || SIGN_ID="-"
+  codesign --force --deep -s "$SIGN_ID" "$APP" 2>/dev/null \
+    || codesign --force --deep -s - "$APP" 2>/dev/null \
+    || echo "WARN: could not sign the bundle"
+fi
 
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 touch "$APP"
