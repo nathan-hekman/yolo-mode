@@ -440,6 +440,20 @@ def watch_loop(status_cb=None) -> None:
         f"watch started ({len(rules)} rules, "
         f"accessibility {'granted' if trusted else 'MISSING - cannot click'})"
     )
+    if not trusted:
+        # Ask, rather than only complaining to the log. Until an app asks, the
+        # Accessibility list often has no row for it at all -- so there is
+        # nothing to switch on. Re-signing with a different certificate makes a
+        # previously granted app land right here.
+        try:
+            from ApplicationServices import (  # noqa: PLC0415
+                AXIsProcessTrustedWithOptions,
+                kAXTrustedCheckOptionPrompt,
+            )
+
+            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+        except Exception as e:
+            log(f"could not raise the accessibility prompt: {e}")
     while True:
         paused = OFF_FLAG.exists()
         if status_cb:
