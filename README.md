@@ -68,6 +68,42 @@ because macOS attributes a click to the binary that makes it — the osascript
 route would require granting Accessibility to `/usr/bin/osascript`, letting any
 script on the machine click any dialog.
 
+## Cloudflare Turnstile
+
+The same idea, one layer down: when a "Verify you are human" checkbox appears,
+YOLO Mode clicks it. Merged in from the standalone `turnstile-autosolve`, which
+this replaces.
+
+It works on pixels, not the DOM. Cloudflare draws the same widget for the
+inline form control and the full-page "Just a moment…" interstitial, but the
+interstitial hides it in a closed shadow DOM where no script can read its
+position. So the widget is template-matched on a screen grab, and clicked with
+a real CGEvent — Turnstile checks `isTrusted`, and a CDP or Playwright click
+reports false.
+
+Two places it looks, both gated:
+
+- **The scraper CDP ports** (9222/9223/9224/9225). Reading `/json/list` over
+  plain HTTP is cheap and, unlike `connect_over_cdp`, doesn't hang on a busy
+  Brave. An interstitial sets the tab title, so a challenged tab shows up
+  without attaching. The tab is foregrounded, solved, and focus handed back.
+- **The frontmost Chrome/Brave window**, which catches inline widgets — those
+  never change the tab title, so the port check can't see them.
+
+Nothing is ever captured unless a port reports a challenge or a browser is
+already frontmost. Without that gate this would be a screen recorder.
+
+Both monitors are searched. The standalone tool only looked at the main one, so
+a challenge on the second screen sat there.
+
+Needs **Screen Recording**. Without it the capture still succeeds — it just
+returns the desktop with every window stripped out, which matches as "nothing
+to solve" forever, so the solver checks at startup and says so rather than
+running as a silent no-op.
+
+Off switches: the menubar toggle, `touch ~/.turnstile_autosolve_off` (the old
+tool's path, still honoured), or either of the global pauses.
+
 ## Install
 
 ```bash
@@ -85,8 +121,9 @@ Then:
    alerts are skipped.
 2. Grant **Accessibility** in System Settings → Privacy & Security. The
    menubar's *Fix Permissions…* item opens it and triggers the prompt.
-3. Optional: **Screen Recording**, which makes window titles visible so alerts
-   can quote the dialog instead of naming the app.
+3. Grant **Screen Recording**. Two things need it: the Turnstile solver, and
+   window titles — without it macOS hides them, so alerts name the app instead
+   of quoting the dialog. The installer opens the pane if it isn't granted.
 
 For Claude Code alerts, point a `Notification` hook at the repo:
 
@@ -108,6 +145,8 @@ For Claude Code alerts, point a `Notification` hook at the repo:
 - **Test Auto-Approve** — raises a real dialog of its own and waits to see
   whether the watcher clicks it. A test that can't fail the way the feature
   fails isn't a test.
+- **Solve Cloudflare Now** — looks for a challenge regardless of the gate,
+  for when one is sitting in a window that never came to the front.
 
 ## Logs
 

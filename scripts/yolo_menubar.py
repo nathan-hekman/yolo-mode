@@ -57,6 +57,9 @@ from Foundation import NSMutableAttributedString, NSObject  # noqa: E402
 
 SHOW_FLAG = Path.home() / ".yolo_mode_show"
 NOTIFY_FLAG = Path.home() / ".yolo_mode_notify_test"
+# Kept from the standalone turnstile-autosolve, so anything that touched this
+# path to pause the solver still pauses it.
+TURNSTILE_OFF_FLAG = Path.home() / ".turnstile_autosolve_off"
 OUT_LOG = Path.home() / "Library/Logs/yolo-mode.out.log"
 
 # The menubar wears the brand: the name is the status.
@@ -299,6 +302,9 @@ class YoloApp(rumps.App):
         self.auto_item = rumps.MenuItem(
             "Auto-approve system dialogs", callback=self.toggle_auto
         )
+        self.turnstile_item = rumps.MenuItem(
+            "Auto-solve Cloudflare checks", callback=self.toggle_turnstile
+        )
         self.menu = [
             self.status_item,
             self.count_item,
@@ -307,14 +313,17 @@ class YoloApp(rumps.App):
             rumps.MenuItem("Open Window", callback=self.open_window),
             rumps.MenuItem("Open Log", callback=self.open_log),
             rumps.MenuItem("Test Auto-Approve", callback=self.test_auto),
+            rumps.MenuItem("Solve Cloudflare Now", callback=self.solve_turnstile),
             rumps.MenuItem("Enable Notifications", callback=self.enable_notifications),
             rumps.MenuItem("Fix Permissions…", callback=self.open_privacy),
             None,
             self.auto_item,
+            self.turnstile_item,
             self.pause_item,
             rumps.MenuItem("Quit", callback=self.quit_app),
         ]
         self.paused = False
+        self.turnstile_solves = 0
         self.window: EventWindow | None = None
         self.panel = AlertPanel()
         self._icon_kind = None
@@ -325,11 +334,17 @@ class YoloApp(rumps.App):
 
     def start_watcher(self):
         threading.Thread(
-            target=aw.watch_loop, kwargs={"status_cb": self._on_status}, daemon=True
+            target=aw.watch_loop,
+            kwargs={"status_cb": self._on_status,
+                    "turnstile_cb": self._on_turnstile},
+            daemon=True,
         ).start()
 
     def _on_status(self, paused: bool):
         self.paused = paused
+
+    def _on_turnstile(self, solves: int):
+        self.turnstile_solves = solves
 
     def _ensure_window(self) -> EventWindow:
         if self.window is None:
@@ -371,6 +386,11 @@ class YoloApp(rumps.App):
         self.pause_item.title = "Resume" if self.paused else "Pause"
         self.count_item.title = f"Sent to phone today: {pushed}  (of {total} events)"
         self.auto_item.state = 0 if aw.AUTO_OFF_FLAG.exists() else 1
+        self.turnstile_item.state = 0 if TURNSTILE_OFF_FLAG.exists() else 1
+        if self.turnstile_solves:
+            self.turnstile_item.title = (
+                f"Auto-solve Cloudflare checks ({self.turnstile_solves} today)"
+            )
         events = eventlog.read_events(20)
         if events:
             last = events[-1]
@@ -417,6 +437,33 @@ class YoloApp(rumps.App):
         else:
             aw.AUTO_OFF_FLAG.touch()
             eventlog.log("auto-approve disabled")
+
+    def toggle_turnstile(self, _):
+        """The Cloudflare solver alone; the global pause still overrides it."""
+        import turnstile  # noqa: PLC0415
+
+        if turnstile.OFF_FLAG.exists():
+            turnstile.OFF_FLAG.unlink(missing_ok=True)
+            eventlog.log("turnstile auto-solve enabled")
+        else:
+            turnstile.OFF_FLAG.touch()
+            eventlog.log("turnstile auto-solve disabled")
+
+    def solve_turnstile(self, _):
+        """Solve whatever challenge is on screen right now, on demand.
+
+        The watcher only looks when a CDP port reports one or a browser is
+        frontmost. Clicking this menu item is how you say "look anyway" --
+        useful when the challenge is sitting in a window that never came to
+        the front.
+        """
+        def run():
+            import turnstile  # noqa: PLC0415
+
+            result = turnstile.solve_once()
+            eventlog.log(f"turnstile manual solve: {result}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def open_window(self, _):
         self._ensure_window().show()

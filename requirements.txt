@@ -2,3 +2,8 @@ rumps>=0.4.0
 requests>=2.31.0
 pyobjc-framework-Quartz>=10.0
 pyobjc-framework-ApplicationServices>=10.0
+# Turnstile solver: template-matches the Cloudflare widget on a screen grab.
+# The headless build is the right one -- it drops the GUI/Qt payload we would
+# never call, and the bundle ships every byte of site-packages.
+opencv-python-headless>=4.10.0
+numpy>=2.0.0

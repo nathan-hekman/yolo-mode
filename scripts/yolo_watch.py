@@ -40,8 +40,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eventlog  # noqa: E402
+import macinput  # noqa: E402
 import secrets_store as secrets  # noqa: E402
 from eventlog import log  # noqa: E402
+from macinput import mouse_click  # noqa: E402  (re-exported: callers use aw.mouse_click)
 
 from ApplicationServices import (  # type: ignore  # noqa: E402
     AXIsProcessTrusted,
@@ -61,14 +63,7 @@ from ApplicationServices import (  # type: ignore  # noqa: E402
     kAXWindowsAttribute,
 )
 from Quartz import (  # type: ignore  # noqa: E402
-    CGEventCreateMouseEvent,
-    CGEventPost,
     CGWindowListCopyWindowInfo,
-    kCGEventLeftMouseDown,
-    kCGEventLeftMouseUp,
-    kCGEventMouseMoved,
-    kCGHIDEventTap,
-    kCGMouseButtonLeft,
     kCGNullWindowID,
     kCGWindowListExcludeDesktopElements,
     kCGWindowListOptionOnScreenOnly,
@@ -168,32 +163,19 @@ def _element_center(element):
     return (p.x + s.width / 2.0, p.y + s.height / 2.0)
 
 
-def mouse_click(x: float, y: float) -> None:
-    """Move the real cursor to (x, y) and left-click, like a person would.
-
-    Some dialogs -- notably 1Password's Authorize prompt, which is a web view
-    inside an AXWebArea -- expose an AXButton whose AXPress does nothing or
-    lands unreliably. Driving the actual mouse is what a human does and what
-    those web controls actually respond to. The move-before-click matters:
-    web hit-testing keys off the current pointer, so a click with no prior
-    move can miss.
-    """
-    move = CGEventCreateMouseEvent(None, kCGEventMouseMoved, (x, y), kCGMouseButtonLeft)
-    CGEventPost(kCGHIDEventTap, move)
-    down = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, (x, y), kCGMouseButtonLeft)
-    CGEventPost(kCGHIDEventTap, down)
-    up = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, (x, y), kCGMouseButtonLeft)
-    CGEventPost(kCGHIDEventTap, up)
-
-
 def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int = 3,
-                      ax_timeout: float = AX_TIMEOUT):
+                      ax_timeout: float = AX_TIMEOUT, seen_out: list | None = None):
     """Return (title, element) for the first approve-looking button, or None.
 
     This doubles as the test for "is this actually a permission dialog?". A
     catch-all rule that trusts window shape alone matches Notes, FaceTime and
     every other small window on the Mac -- asking the accessibility tree
     whether an Allow button exists is the only honest answer.
+
+    seen_out collects every button title found, so a caller that rejects the
+    window can say what it actually saw. Without that, a new kind of system
+    prompt whose buttons sit deeper than max_depth looks exactly like an
+    ordinary window, and the only evidence is silence.
     """
     if not AXIsProcessTrusted():
         return None
@@ -208,6 +190,8 @@ def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int =
         found: list[tuple[str, object]] = []
         for window in _ax_value(app, kAXWindowsAttribute) or []:
             _collect_buttons(window, found, max_depth=max_depth)
+        if seen_out is not None:
+            seen_out.extend(t for t, _ in found)
         for title, element in found:
             if title in buttons:
                 return title, element
@@ -404,6 +388,7 @@ NO_BUTTON_TTL = 120   # seconds to remember "this window has no Allow button"
 MAX_PROBES_PER_SCAN = 3  # accessibility probes per pass, so one pass stays quick
 MAX_AX_NODES = 120       # nodes per probe; a permission dialog needs far fewer
 _no_button: dict[str, float] = {}
+_skip_logged: set[str] = set()
 
 
 def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> None:
@@ -452,9 +437,29 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                 if probes >= MAX_PROBES_PER_SCAN:
                     break  # keep the pass short; this window gets the next one
                 probes += 1
+                saw: list[str] = []
                 if not find_allow_button(pid, allowed, rule.get("max_depth", 3),
-                                         rule.get("ax_timeout", AX_TIMEOUT)):
+                                         rule.get("ax_timeout", AX_TIMEOUT), saw):
                     _no_button[key] = now
+                    # Name the rejected window and its buttons. A new system
+                    # prompt whose Allow sits deeper than max_depth is
+                    # indistinguishable from an ordinary window otherwise --
+                    # this line is what turns "it never fired" into a fact
+                    # about which owner and which button titles were there.
+                    # Named buttons only, and only a few. An ordinary app
+                    # window answers with a couple of hundred untitled
+                    # controls, and a log line that long buries the one case
+                    # this is here to catch.
+                    named = sorted({t for t in saw if t.strip()})[:8]
+                    # Once per window per run. The point is to discover a new
+                    # kind of dialog, and the same Finder or updater window
+                    # sits there all day -- re-reporting it every NO_BUTTON_TTL
+                    # would add a thousand lines a day to a log meant to be
+                    # read.
+                    if named and key not in _skip_logged:
+                        _skip_logged.add(key)
+                        log(f"skipped {owner!r} dialog {title!r} ({w:.0f}x{h:.0f}): "
+                            f"no allowed button, saw {named}")
                     break
 
             seen[key] = now
@@ -505,7 +510,30 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
             del streak[key]
 
 
-def watch_loop(status_cb=None) -> None:
+def start_turnstile(status_cb=None) -> None:
+    """Run the Turnstile solver on its own thread.
+
+    Separate thread, not another rule: the dialog watcher reads the
+    accessibility tree, while the solver matches pixels and has to sit through
+    a multi-second settle after each click. Sharing one loop would mean a
+    Cloudflare solve blocking every permission dialog for six seconds.
+    """
+    import threading  # noqa: PLC0415
+
+    try:
+        import turnstile  # noqa: PLC0415
+    except Exception as e:
+        log(f"turnstile solver unavailable: {e}")
+        return
+    threading.Thread(
+        target=turnstile.watch_loop,
+        args=(OFF_FLAG, AUTO_OFF_FLAG),
+        kwargs={"status_cb": status_cb},
+        daemon=True,
+    ).start()
+
+
+def watch_loop(status_cb=None, turnstile_cb=None) -> None:
     rules = load_rules()
     seen: dict[str, float] = {}
     streak: dict[str, int] = {}
@@ -528,6 +556,7 @@ def watch_loop(status_cb=None) -> None:
             AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
         except Exception as e:
             log(f"could not raise the accessibility prompt: {e}")
+    start_turnstile(turnstile_cb)
     while True:
         paused = OFF_FLAG.exists()
         if status_cb:

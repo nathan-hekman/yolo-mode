@@ -1,7 +1,7 @@
 {
   "_comment": "dialog_sized keeps ordinary app windows from matching; every rule also has to survive CONFIRM_SCANS polls (see yolo_watch.py). UserNotificationCenter was the main source of false 'approval needed' alerts, so it is dialog-gated too.",
   "_auto_approve": "auto_approve clicks the dialog's Allow/OK button and pushes an after-the-fact alert naming what was granted. It only ever clicks a button whose exact title is in ALLOW_BUTTONS, needs Accessibility permission, and is switched off by `touch ~/.yolo_mode_no_autoapprove` or the menubar toggle.",
-  "_catch_all": "The last rule is a catch-all: any dialog-shaped window showing an Allow/OK button gets approved, whoever owns it. owner_not carves out the three kinds that stay manual. SecurityAgent, loginwindow and Keychain are how macOS asks Nathan to prove he is Nathan -- a watcher that clicks those turns his password prompt into a formality for whatever asked. 1Password releases vault secrets, so it stays manual EXCEPT the explicit 'Access Requested / Allow ... to get CLI access' dialog, which is auto-Authorized by its own rule above (buttons=['Authorize'] only, so Unlock and other 1Password prompts are untouched). CoreServicesUIAgent is Gatekeeper, where the Allow-shaped button runs a program that was just downloaded, which is how a drive-by download becomes a running program. Everything else -- screen recording, mic, camera, files, automation, Shortcuts -- is auto-approved.",
+  "_catch_all": "The last rule is a catch-all: any dialog-shaped window showing an Allow/OK button gets approved, whoever owns it. owner_not carves out the three kinds that stay manual. SecurityAgent, loginwindow and Keychain are how macOS asks Nathan to prove he is Nathan -- a watcher that clicks those turns his password prompt into a formality for whatever asked. 1Password releases vault secrets, so it stays manual EXCEPT the explicit 'Access Requested / Allow ... to get CLI access' dialog, which is auto-Authorized by its own rule above (buttons=['Authorize'] only, so Unlock and other 1Password prompts are untouched). CoreServicesUIAgent is Gatekeeper, where the Allow-shaped button runs a program that was just downloaded, which is how a drive-by download becomes a running program. Everything else -- screen recording, mic, camera, files, automation, Shortcuts -- is auto-approved. The ScreenCaptureKit picker-bypass alert (\"X is requesting to bypass the system private window picker and directly access your screen and audio\") needs no rule of its own: it is a UserNotificationCenter dialog with an Allow button, so the rule above already clicks it -- confirmed in the log 2026-07-24 for both Claude and YOLO Mode itself. max_depth stays at the default 3 on purpose. Raising it to 8 was tried the same day and reverted: a single Terminal window yielded 200+ untitled buttons per probe, which is the loop starvation the depth limit exists to prevent.",
   "rules": [
     {
       "owner": "osascript",
@@ -92,5 +92,23 @@
       "label": "Permission dialog",
       "require_allow_button": true
     }
-  ]
+  ],
+  "_turnstile": "Cloudflare Turnstile auto-solver (scripts/turnstile.py), merged in from the standalone turnstile-autosolve. Nothing is captured unless a CDP port reports an interstitial or a browser is already frontmost. Needs Screen Recording granted to YOLO Mode. Pause it alone with ~/.turnstile_autosolve_off; the global pause and the auto-approve toggle also stop it.",
+  "turnstile": {
+    "enabled": true,
+    "ports": [9222, 9223, 9224, 9225],
+    "interval": 2.0,
+    "cooldown": 8.0,
+    "settle": 6.0,
+    "max_attempts": 3,
+    "port_app": "Brave Browser",
+    "browsers": [
+      "Brave Browser",
+      "Brave Browser Beta",
+      "Brave Browser Nightly",
+      "Google Chrome",
+      "Google Chrome Canary",
+      "Chromium"
+    ]
+  }
 }

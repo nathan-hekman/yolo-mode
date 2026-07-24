@@ -148,7 +148,32 @@ CREDEOF
   echo "NOTE: add your Pushover keys to $CREDS (phone alerts are off until you do)"
 fi
 
+# ---- retire the standalone Turnstile watcher ------------------------------
+# Its solver now lives in scripts/turnstile.py and runs on a thread inside this
+# app. Leaving the old LaunchAgent loaded would mean two processes racing to
+# click the same checkbox, each with its own cooldown, neither aware of the
+# other -- and two menubar icons for one job.
+OLD_TS="com.hekman.turnstile-autosolve"
+if launchctl print "gui/$(id -u)/$OLD_TS" >/dev/null 2>&1; then
+  launchctl bootout "gui/$(id -u)/$OLD_TS" 2>/dev/null || true
+  echo "Retired the standalone Turnstile watcher ($OLD_TS)."
+fi
+rm -f "$HOME/Library/LaunchAgents/$OLD_TS.plist"
+pkill -f turnstile_menubar 2>/dev/null || true
+rm -f "$HOME/.turnstile_watch.pid"
+
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 echo "Installed + started $LABEL. Log: $OUTLOG"
+
+# ---- Screen Recording, for the Turnstile solver ---------------------------
+# Without it the capture still succeeds and simply returns the desktop with
+# every window missing, so the solver would sit there matching nothing and
+# never say why. Check and point at the pane instead.
+if ! "$VENV_PY" -c "from Quartz import CGPreflightScreenCaptureAccess as p; import sys; sys.exit(0 if p() else 1)" 2>/dev/null; then
+  echo
+  echo "Screen Recording is NOT granted yet -- the Cloudflare solver cannot see"
+  echo "challenges until it is. Opening the pane; enable 'YOLO Mode':"
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" 2>/dev/null || true
+fi
