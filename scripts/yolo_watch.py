@@ -6,7 +6,10 @@ window matching an approval rule appears: macOS auth prompts (SecurityAgent),
 TCC permission dialogs (UserNotificationCenter), Gatekeeper
 (CoreServicesUIAgent), 1Password unlock / agentic-autofill approvals.
 
-Notify-only: it never clicks or dismisses anything.
+Rules opt into clicking: a rule with auto_approve presses the dialog's
+Allow/OK-type button (or drives the real mouse to it when click_method is
+"mouse", for web-view dialogs like 1Password's Authorize prompt whose AXButton
+ignores AXPress). Rules without auto_approve stay notify-only.
 
 Two anti-noise rules, both learned from the first version firing "System
 permission dialog" at nothing:
@@ -46,14 +49,26 @@ from ApplicationServices import (  # type: ignore  # noqa: E402
     AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication,
     AXUIElementPerformAction,
+    AXValueGetValue,
     kAXChildrenAttribute,
+    kAXPositionAttribute,
     kAXPressAction,
     kAXRoleAttribute,
+    kAXSizeAttribute,
     kAXTitleAttribute,
+    kAXValueCGPointType,
+    kAXValueCGSizeType,
     kAXWindowsAttribute,
 )
 from Quartz import (  # type: ignore  # noqa: E402
+    CGEventCreateMouseEvent,
+    CGEventPost,
     CGWindowListCopyWindowInfo,
+    kCGEventLeftMouseDown,
+    kCGEventLeftMouseUp,
+    kCGEventMouseMoved,
+    kCGHIDEventTap,
+    kCGMouseButtonLeft,
     kCGNullWindowID,
     kCGWindowListExcludeDesktopElements,
     kCGWindowListOptionOnScreenOnly,
@@ -134,7 +149,45 @@ def _ax_value(element, attribute):
     return value if err == 0 else None
 
 
-def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS):
+def _element_center(element):
+    """Global screen center (x, y) of an AX element, or None.
+
+    AXPosition/AXSize come back as opaque AXValue structs; AXValueGetValue
+    unpacks them into a CGPoint/CGSize. The coordinates share the top-left
+    origin that CGEvent mouse events use, so the returned pair can drive a
+    synthetic click directly with no flip.
+    """
+    pos = _ax_value(element, kAXPositionAttribute)
+    size = _ax_value(element, kAXSizeAttribute)
+    if pos is None or size is None:
+        return None
+    okp, p = AXValueGetValue(pos, kAXValueCGPointType, None)
+    oks, s = AXValueGetValue(size, kAXValueCGSizeType, None)
+    if not (okp and oks):
+        return None
+    return (p.x + s.width / 2.0, p.y + s.height / 2.0)
+
+
+def mouse_click(x: float, y: float) -> None:
+    """Move the real cursor to (x, y) and left-click, like a person would.
+
+    Some dialogs -- notably 1Password's Authorize prompt, which is a web view
+    inside an AXWebArea -- expose an AXButton whose AXPress does nothing or
+    lands unreliably. Driving the actual mouse is what a human does and what
+    those web controls actually respond to. The move-before-click matters:
+    web hit-testing keys off the current pointer, so a click with no prior
+    move can miss.
+    """
+    move = CGEventCreateMouseEvent(None, kCGEventMouseMoved, (x, y), kCGMouseButtonLeft)
+    CGEventPost(kCGHIDEventTap, move)
+    down = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, (x, y), kCGMouseButtonLeft)
+    CGEventPost(kCGHIDEventTap, down)
+    up = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, (x, y), kCGMouseButtonLeft)
+    CGEventPost(kCGHIDEventTap, up)
+
+
+def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int = 3,
+                      ax_timeout: float = AX_TIMEOUT):
     """Return (title, element) for the first approve-looking button, or None.
 
     This doubles as the test for "is this actually a permission dialog?". A
@@ -148,11 +201,13 @@ def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS):
         app = AXUIElementCreateApplication(pid)
         # Default AX timeout is ~6s per call. A busy app that never answers
         # would stall the whole poll loop, which is what made the dialog time
-        # out before the watcher ever looped back to click it.
-        AXUIElementSetMessagingTimeout(app, AX_TIMEOUT)
+        # out before the watcher ever looped back to click it. A web-view
+        # dialog (1Password) needs a longer per-call budget than a native one,
+        # or its tree reads back truncated at random -- rules raise ax_timeout.
+        AXUIElementSetMessagingTimeout(app, ax_timeout)
         found: list[tuple[str, object]] = []
         for window in _ax_value(app, kAXWindowsAttribute) or []:
-            _collect_buttons(window, found)
+            _collect_buttons(window, found, max_depth=max_depth)
         for title, element in found:
             if title in buttons:
                 return title, element
@@ -161,19 +216,22 @@ def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS):
     return None
 
 
-def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS) -> str | None:
+def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int = 3,
+                 ax_timeout: float = AX_TIMEOUT, click_method: str = "press") -> str | None:
     """Click the approve button on a system permission dialog.
 
     Only buttons whose exact title is in ALLOW_BUTTONS are ever clicked -- this
     never presses "the first button" or anything it cannot name, so a dialog
     with unfamiliar wording is left alone for a human.
 
-    Uses the accessibility API in-process rather than shelling out to
-    osascript. That matters for more than speed: TCC attributes the click to
-    the binary that makes it, so the osascript route required granting
-    Accessibility to /usr/bin/osascript -- which would let any script on the
-    machine click any dialog. In-process, the grant belongs to this app alone
-    and revoking it revokes exactly this.
+    click_method picks how the button is actuated:
+      * "press" (default) fires AXPress in-process. TCC attributes the click to
+        this binary, so the Accessibility grant belongs to this app alone and
+        revoking it revokes exactly this -- unlike the osascript route, which
+        would let any script on the machine click any dialog.
+      * "mouse" reads the button's screen center and drives the real cursor
+        there (see mouse_click). Needed for web-view dialogs whose AXButton
+        ignores AXPress. Costs a visible cursor jump, so it is opt-in per rule.
 
     Returns the clicked button title, or None.
     """
@@ -182,12 +240,19 @@ def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS) -> str | 
         return None
     try:
         app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, AX_TIMEOUT)
+        AXUIElementSetMessagingTimeout(app, ax_timeout)
         found: list[tuple[str, object]] = []
         for window in _ax_value(app, kAXWindowsAttribute) or []:
-            _collect_buttons(window, found)
+            _collect_buttons(window, found, max_depth=max_depth)
         for title, element in found:
             if title in buttons:
+                if click_method == "mouse":
+                    center = _element_center(element)
+                    if center is None:
+                        log(f"auto-approve: no coords for {title!r} ({owner})")
+                        continue
+                    mouse_click(*center)
+                    return title
                 if AXUIElementPerformAction(element, kAXPressAction) == 0:
                     return title
                 log(f"auto-approve: press failed on {title!r} ({owner})")
@@ -203,7 +268,8 @@ def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS) -> str | 
         return None
 
 
-def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = None) -> None:
+def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = None,
+                     max_depth: int = 3) -> None:
     """Walk the accessibility tree for buttons, within a strict budget.
 
     Buttons are rarely direct children of the window: permission dialogs nest
@@ -212,11 +278,15 @@ def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = N
     every node is a blocking call, which stretched one poll pass to 27 seconds
     and let real dialogs come and go unseen.
 
-    A permission dialog is small and shallow. Anything that isn't, isn't one.
+    A native permission dialog is small and shallow, so max_depth defaults to 3.
+    A web-view dialog (1Password renders its Authorize prompt inside an
+    AXWebArea) buries its buttons ~8 levels down, so those rules raise max_depth
+    themselves. The MAX_AX_NODES budget still caps total work either way, so a
+    deeper limit stays safe on a small dialog.
     """
     if budget is None:
         budget = [MAX_AX_NODES]
-    if depth > 3 or budget[0] <= 0:
+    if depth > max_depth or budget[0] <= 0:
         return
     for child in _ax_value(element, kAXChildrenAttribute) or []:
         budget[0] -= 1
@@ -226,7 +296,7 @@ def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = N
         if role == "AXButton":
             out.append((_ax_value(child, kAXTitleAttribute) or "", child))
         else:
-            _collect_buttons(child, out, depth + 1, budget)
+            _collect_buttons(child, out, depth + 1, budget, max_depth)
 
 
 def notify(label: str, owner: str, title: str, says: str) -> bool:
@@ -382,7 +452,8 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                 if probes >= MAX_PROBES_PER_SCAN:
                     break  # keep the pass short; this window gets the next one
                 probes += 1
-                if not find_allow_button(pid, allowed):
+                if not find_allow_button(pid, allowed, rule.get("max_depth", 3),
+                                         rule.get("ax_timeout", AX_TIMEOUT)):
                     _no_button[key] = now
                     break
 
@@ -396,6 +467,9 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     owner,
                     info.get("kCGWindowOwnerPID") or 0,
                     tuple(rule.get("buttons") or ALLOW_BUTTONS),
+                    rule.get("max_depth", 3),
+                    rule.get("ax_timeout", AX_TIMEOUT),
+                    rule.get("click_method", "press"),
                 )
                 if clicked:
                     what = says or title or rule["label"]
