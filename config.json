@@ -45,6 +45,7 @@
       "max_depth": 12,
       "ax_timeout": 3.0,
       "click_method": "mouse",
+      "cooldown": 0,
       "label": "1Password CLI-access authorize"
     },
     {
