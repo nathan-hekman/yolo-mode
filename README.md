@@ -55,12 +55,63 @@ Guardrails:
   catch-all narrows that to Allow / Always Allow / Allow While Using App —
   "OK" means "grant" on a named permission dialog, but on an unknown app's
   dialog it could be confirming a deletion.
-- Three kinds are never auto-approved: **authentication** (SecurityAgent,
-  loginwindow, Keychain — how macOS asks you to prove you are you),
-  **1Password** (releases vault secrets), and **Gatekeeper** (its Allow-shaped
-  button runs a program that was just downloaded).
+- Two kinds are never auto-approved: **Gatekeeper** (its Allow-shaped button
+  runs a program that was just downloaded, which is how a drive-by download
+  becomes a running program) and **1Password** generally — with one carve-out,
+  the "Allow … to get CLI access" dialog, which is auto-Authorized by a rule
+  that will click nothing but a button titled exactly `Authorize`, so Unlock and
+  every other 1Password prompt is untouched.
 - Every auto-approval is logged and pushed after the fact.
 - Off switch: the menubar toggle, or `touch ~/.yolo_mode_no_autoapprove`.
+
+## macOS password prompts
+
+The dialog that says *"Claude is trying to add a new helper tool. Enter your
+password to allow this."* is filled in for you: YOLO Mode reads the Mac login
+password from 1Password (`op://Bots/Mac login/password`), types it, and presses
+the button macOS already had highlighted — `Add Helper`, `Modify Settings`,
+whatever that prompt happens to call it.
+
+**This is the one feature here that hands out privilege rather than granting a
+capability.** Everything else clicks Allow on a request for a camera or a
+folder; this gives away admin rights. It fires on *every* SecurityAgent prompt,
+not an allowlist of apps, so anything on the Mac that can raise a password
+prompt now gets one answered without a human present. That is a deliberate
+trade, and the Pushover alert — high priority, sent immediately after, naming
+the app and quoting the dialog — is the review step. It is sent whether or not
+the fill succeeded, because a password prompt that was answered and *not*
+reported is the only genuinely bad outcome available.
+
+Guardrails, all of them learned the hard way on 2026-08-04:
+
+- Nothing is typed until the prompt's own process is confirmed **frontmost**.
+  Synthetic keystrokes follow the frontmost app, not accessibility focus — the
+  first working version raised the dialog with `NSRunningApplication.activate`,
+  which returns `True` for SecurityAgent and does nothing, and typed the
+  password into 1Password's window instead. The dialog is now clicked with the
+  real mouse, which fronts it and focuses the field in one motion, and the
+  frontmost app is checked again before a key is sent.
+- Nothing is submitted until the field is confirmed to hold exactly as many
+  characters as were sent. A short read gets backspaced out rather than tried.
+- Two attempts per dialog per run. A wrong password leaves the same dialog on
+  screen, and an uncapped retry loop locks the account out.
+- The password is read from 1Password per prompt, never cached, never logged,
+  never written to disk. See `scripts/mac_password.py`.
+- Off switch: `touch ~/.yolo_mode_no_password` (this alone), or either of the
+  two broader switches above.
+
+The read prefers a read-only 1Password **service account** scoped to the `Bots`
+vault — create it yourself, in your own terminal, never from an agent session,
+since the token is printed once:
+
+```
+op service-account create yolo-mode --vault Bots:read_items --expires-in 365d
+# paste into ~/.config/yolo-mode/op-token, then
+chmod 600 ~/.config/yolo-mode/op-token
+```
+
+Without that file it falls back to the 1Password desktop integration, which
+works unattended only because the Authorize rule above clicks its dialog.
 
 Clicking needs **Accessibility** permission. YOLO Mode presses buttons through
 the accessibility API in-process rather than shelling out to `osascript`,

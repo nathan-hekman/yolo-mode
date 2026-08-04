@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eventlog  # noqa: E402
+import mac_password  # noqa: E402
 import macinput  # noqa: E402
 import secrets_store as secrets  # noqa: E402
 from eventlog import log  # noqa: E402
@@ -53,11 +54,14 @@ from ApplicationServices import (  # type: ignore  # noqa: E402
     AXUIElementPerformAction,
     AXValueGetValue,
     kAXChildrenAttribute,
+    kAXFocusedAttribute,
     kAXPositionAttribute,
     kAXPressAction,
     kAXRoleAttribute,
     kAXSizeAttribute,
+    kAXSubroleAttribute,
     kAXTitleAttribute,
+    kAXValueAttribute,
     kAXValueCGPointType,
     kAXValueCGSizeType,
     kAXWindowsAttribute,
@@ -250,6 +254,269 @@ def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth
     except Exception as e:
         log(f"auto-approve error ({owner}): {e}")
         return None
+
+
+AUTH_OFF_FLAG = Path.home() / ".yolo_mode_no_password"
+AUTH_MAX_ATTEMPTS = 2   # per dialog identity, per run
+_auth_attempts: dict[str, int] = {}
+_auth_busy: set[str] = set()
+
+
+def _find_secure_field(pid: int, ax_timeout: float = AX_TIMEOUT):
+    """Return (window, password field) for a macOS auth prompt, or None.
+
+    The password box is identified by AXSubrole == AXSecureTextField, never by
+    position. A SecurityAgent prompt has two text fields -- the username, which
+    arrives prefilled, and the password -- and "the second one" is a rule that
+    holds until the first prompt that omits the username row and silently types
+    the password into a field that is about to be shown on screen.
+    """
+    try:
+        app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, ax_timeout)
+        for window in _ax_value(app, kAXWindowsAttribute) or []:
+            for child in _ax_value(window, kAXChildrenAttribute) or []:
+                if (_ax_value(child, kAXRoleAttribute) == "AXTextField"
+                        and _ax_value(child, kAXSubroleAttribute) == "AXSecureTextField"):
+                    return window, child
+    except Exception as e:
+        log(f"auth-fill: field scan error (pid {pid}): {e}")
+    return None
+
+
+def _clear_field(presses: int) -> None:
+    """Backspace over whatever was typed, so a partial password is not left
+    sitting in a field for a human to hit Return on."""
+    from Quartz import CGEventCreateKeyboardEvent  # noqa: PLC0415
+    from Quartz import CGEventPost, kCGHIDEventTap  # noqa: PLC0415
+
+    for _ in range(presses):
+        for down in (True, False):
+            CGEventPost(kCGHIDEventTap, CGEventCreateKeyboardEvent(None, 51, down))
+        time.sleep(0.03)
+
+
+def _window_static_text(window) -> str:
+    """What the dialog actually says, read straight off the window.
+
+    SecurityAgent reports its window title as "Untitled" and osascript's
+    `value of static texts` needs an Automation grant this app does not want,
+    so every one of these alerts used to read "SecurityAgent: Untitled". The
+    words are right there in the AX tree: "Claude", "An update is ready to
+    install...", "Enter your password to allow this."
+    """
+    parts = []
+    try:
+        for child in _ax_value(window, kAXChildrenAttribute) or []:
+            if _ax_value(child, kAXRoleAttribute) == "AXStaticText":
+                text = (_ax_value(child, kAXValueAttribute) or "").strip()
+                if text:
+                    parts.append(text)
+    except Exception:
+        pass
+    return " ".join(parts)[:300]
+
+
+def auth_fill(owner: str, pid: int, key: str,
+              ax_timeout: float = AX_TIMEOUT) -> tuple[str, str] | None:
+    """Type the Mac login password into a macOS auth prompt and submit it.
+
+    This is the one rule in the app that hands out privilege rather than
+    granting a capability, so it is deliberately the narrowest path here:
+
+      * The window must actually contain an AXSecureTextField. A dialog with no
+        password box is not an auth prompt, whatever it is called.
+      * Nothing is typed until the prompt's own process is confirmed frontmost
+        and its field confirmed focused, and nothing is submitted until the
+        field is confirmed to hold exactly as many characters as were sent.
+        Synthetic keystrokes go to the frontmost app, so without those checks a
+        dialog that quietly loses focus turns this into a password leak.
+      * The submit is the window's own AXDefaultButton -- the one Return would
+        press, the one already highlighted. There is no button-title allowlist
+        because the wording is different every time ("Add Helper", "Modify
+        Settings", "Install Helper"), and pressing whatever is default is
+        exactly what a human hitting Return does.
+      * Two attempts per dialog per run. A wrong password leaves the same
+        dialog on screen, and an uncapped loop would retype it until the
+        account locked out.
+      * Three switches turn it off: ~/.yolo_mode_no_password (this alone),
+        ~/.yolo_mode_no_autoapprove (all clicking), ~/.yolo_mode_off (all of it).
+
+    Nathan chose to have every SecurityAgent prompt filled rather than an
+    allowlist of apps, on the understanding that the Pushover alert -- sent
+    after the fact, naming the app and what it asked for -- is the review step.
+    That trade is only sound because the alert always fires: an auth prompt
+    that was filled and NOT reported is the failure this is written to avoid,
+    which is why the notify call sits outside the success branch.
+
+    Returns (pressed button title, what the dialog said), or None.
+    """
+    if not AXIsProcessTrusted():
+        _warn_missing_permission()
+        return None
+    if _auth_attempts.get(key, 0) >= AUTH_MAX_ATTEMPTS:
+        return None
+    found = _find_secure_field(pid, ax_timeout)
+    if found is None:
+        log(f"auth-fill: no password field on {owner} dialog")
+        return None
+    window, field = found
+    says = _window_static_text(window)
+
+    default_button = _ax_value(window, "AXDefaultButton")
+    if default_button is None:
+        log(f"auth-fill: {owner} dialog has no default button; left for a human")
+        return None
+    button_title = _ax_value(default_button, kAXTitleAttribute) or "(default)"
+
+    try:
+        password = mac_password.login_password()
+    except mac_password.PasswordUnavailable as e:
+        log(f"auth-fill: {e}")
+        eventlog.record(
+            "error", f"Could not fill password prompt: {e}",
+            source="watcher", project=owner,
+            detail="Check 1Password: scripts/mac_password.py", pushed=False,
+        )
+        return None
+
+    center = _element_center(field)
+    if center is None:
+        log(f"auth-fill: no coords for the password field ({owner})")
+        return None
+
+    _auth_attempts[key] = _auth_attempts.get(key, 0) + 1
+    try:
+        # Click the field with the real mouse. Two quieter routes were tried
+        # first and both failed the same way: NSRunningApplication.activate
+        # will not raise SecurityAgent (it is a background agent, and the call
+        # returns True while the previous app stays frontmost), and
+        # AXFocused=True sets focus inside a process that is not receiving key
+        # events. Synthetic keystrokes follow the FRONTMOST app, not AX focus,
+        # so both left the password being typed into whatever happened to be in
+        # front -- observed 2026-08-04, when it went to 1Password's window.
+        # A mouse click on the field does both jobs at once and is what a
+        # person would do.
+        macinput.mouse_click(*center)
+        time.sleep(0.5)
+
+        # The gate. Never type a password unless the process that will receive
+        # the keystrokes is the one that asked for it. This check is the whole
+        # reason the bug above is not a password leak waiting to recur.
+        front = macinput.frontmost_app() or ""
+        if owner.lower() not in front.lower():
+            log(f"auth-fill: aborted, {front!r} is frontmost, not {owner!r}")
+            return None
+        if not _ax_value(field, kAXFocusedAttribute):
+            log(f"auth-fill: aborted, password field never took focus ({owner})")
+            return None
+
+        macinput.type_text(password)
+        time.sleep(0.3)
+
+        # A secure field reports its contents as one bullet per character
+        # ("contains secure text"), which is enough to prove the keystrokes
+        # landed here and all of them arrived. Submitting a half-typed password
+        # burns an attempt and, three times over, locks the account.
+        typed = len(_ax_value(field, kAXValueAttribute) or "")
+        if typed != len(password):
+            log(f"auth-fill: aborted, field holds {typed} of "
+                f"{len(password)} characters ({owner})")
+            _clear_field(len(password) + 4)
+            return None
+
+        if AXUIElementPerformAction(default_button, kAXPressAction) != 0:
+            log(f"auth-fill: press failed on {button_title!r} ({owner})")
+            return None
+        return button_title, says
+    except Exception as e:
+        log(f"auth-fill error ({owner}): {e}")
+        return None
+    finally:
+        del password
+
+
+def notify_auth_filled(owner: str, what: str, button: str) -> bool:
+    """Say, loudly and immediately, that a password was just typed for you."""
+    try:
+        import requests
+
+        user_key, api_token = secrets.pushover()
+        if not (user_key and api_token):
+            log("no Pushover credentials; see README")
+            return False
+
+        requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "user": user_key,
+                "token": api_token,
+                "title": f"Password entered: {owner}",
+                "message": (
+                    f"{what}\nSubmitted: {button}\n"
+                    "Not you? touch ~/.yolo_mode_no_password"
+                ),
+                # High priority, unlike the other alerts. Everything else here
+                # can wait for the next time the phone is picked up; an admin
+                # password given to something Nathan did not start cannot.
+                "priority": 1,
+            },
+            timeout=12,
+        )
+        return True
+    except Exception as e:
+        log(f"pushover failed: {e}")
+        return False
+
+
+def start_auth_fill(owner: str, pid: int, key: str, label: str,
+                    ax_timeout: float = AX_TIMEOUT) -> None:
+    """Run auth_fill on its own thread and report the result.
+
+    Off the poll thread on purpose: a 1Password read can take tens of seconds
+    when the vault is locked, and blocking the loop for that long means every
+    other dialog on the Mac goes unseen until it returns -- including, on a bad
+    day, the Authorize dialog that this very read is waiting for. That is a
+    deadlock, not a slow poll.
+    """
+    import threading  # noqa: PLC0415
+
+    if key in _auth_busy:
+        return
+    _auth_busy.add(key)
+
+    def run() -> None:
+        try:
+            result = auth_fill(owner, pid, key, ax_timeout)
+            if not result:
+                # Declined, out of attempts, or 1Password unreachable. The
+                # prompt is still sitting there, so fall back to the ordinary
+                # alert rather than going quiet -- silence here reads exactly
+                # like "handled".
+                pushed = notify(label, owner, "", "")
+                eventlog.record(
+                    "approval", label, source="watcher", project=owner,
+                    detail="Password prompt not filled -- see the log",
+                    pushed=pushed,
+                )
+                return
+            button, says = result
+            what = says or label
+            pushed = notify_auth_filled(owner, what, button)
+            eventlog.record(
+                "auto-approved",
+                f"Password entered ({button}): {what}",
+                source="watcher",
+                project=owner,
+                detail="Turn this off with: touch ~/.yolo_mode_no_password",
+                pushed=pushed,
+            )
+        except Exception as e:
+            log(f"auth-fill thread error ({owner}): {e}")
+        finally:
+            _auth_busy.discard(key)
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = None,
@@ -463,6 +730,18 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     break
 
             seen[key] = now
+
+            # Password prompts before anything else: this rule types a secret
+            # rather than clicking a grant, so it has its own switch and its
+            # own thread, and it never falls through to the click path.
+            if rule.get("auth_fill"):
+                if AUTO_OFF_FLAG.exists() or AUTH_OFF_FLAG.exists():
+                    log(f"auth-fill: switched off, leaving {owner} prompt alone")
+                else:
+                    start_auth_fill(owner, pid, key, rule["label"],
+                                    rule.get("ax_timeout", AX_TIMEOUT))
+                    break
+
             says = dialog_text(owner) if not title else ""
 
             # Read the dialog before clicking, so the after-the-fact alert can

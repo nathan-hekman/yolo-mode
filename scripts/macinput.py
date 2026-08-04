@@ -29,11 +29,14 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import time
 
 from AppKit import NSRunningApplication, NSWorkspace  # type: ignore
 from Quartz import (  # type: ignore
     CGDisplayBounds,
+    CGEventCreateKeyboardEvent,
     CGEventCreateMouseEvent,
+    CGEventKeyboardSetUnicodeString,
     CGEventPost,
     CGGetActiveDisplayList,
     kCGEventLeftMouseDown,
@@ -77,6 +80,39 @@ def mouse_click(x: float, y: float) -> None:
         kCGHIDEventTap,
         CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, (x, y), kCGMouseButtonLeft),
     )
+
+
+# ── keyboard ───────────────────────────────────────────────────────────────
+def type_text(text: str, delay: float = 0.045) -> None:
+    """Type a string as real keystrokes into whatever has focus.
+
+    Every character rides on a keyboard CGEvent posted to the HID tap with
+    CGEventKeyboardSetUnicodeString, so the keycode is irrelevant and the
+    current keyboard layout cannot mangle the result -- a literal '@' arrives
+    as '@' on a Dvorak or German layout alike.
+
+    The three alternatives were all rejected:
+      * AXValue on the field -- macOS secure text fields refuse the write, and
+        the ones that accept it skip the change notifications an app may be
+        waiting on.
+      * osascript "keystroke" -- needs an Automation grant for System Events,
+        which hands every script on the machine the same power, and it fails
+        silently against SecurityAgent.
+      * clipboard + Cmd-V -- puts the password in the pasteboard, where every
+        other app on the Mac can read it.
+
+    The delay is per keystroke and deliberate: SecurityAgent drops characters
+    typed faster than roughly 40ms apart, which shows up as a wrong password
+    rather than as an error.
+
+    The caller is responsible for the text. Nothing here is logged.
+    """
+    for ch in text:
+        for down in (True, False):
+            event = CGEventCreateKeyboardEvent(None, 0, down)
+            CGEventKeyboardSetUnicodeString(event, len(ch), ch)
+            CGEventPost(kCGHIDEventTap, event)
+        time.sleep(delay)
 
 
 # ── frontmost app ──────────────────────────────────────────────────────────

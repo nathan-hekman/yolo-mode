@@ -1,7 +1,11 @@
 {
   "_comment": "dialog_sized keeps ordinary app windows from matching; every rule also has to survive CONFIRM_SCANS polls (see yolo_watch.py). UserNotificationCenter was the main source of false 'approval needed' alerts, so it is dialog-gated too.",
   "_auto_approve": "auto_approve clicks the dialog's Allow/OK button and pushes an after-the-fact alert naming what was granted. It only ever clicks a button whose exact title is in ALLOW_BUTTONS, needs Accessibility permission, and is switched off by `touch ~/.yolo_mode_no_autoapprove` or the menubar toggle.",
-  "_catch_all": "The last rule is a catch-all: any dialog-shaped window showing an Allow/OK button gets approved, whoever owns it. owner_not carves out the three kinds that stay manual. SecurityAgent, loginwindow and Keychain are how macOS asks Nathan to prove he is Nathan -- a watcher that clicks those turns his password prompt into a formality for whatever asked. 1Password releases vault secrets, so it stays manual EXCEPT the explicit 'Access Requested / Allow ... to get CLI access' dialog, which is auto-Authorized by its own rule above (buttons=['Authorize'] only, so Unlock and other 1Password prompts are untouched). CoreServicesUIAgent is Gatekeeper, where the Allow-shaped button runs a program that was just downloaded, which is how a drive-by download becomes a running program. Everything else -- screen recording, mic, camera, files, automation, Shortcuts -- is auto-approved. The ScreenCaptureKit picker-bypass alert (\"X is requesting to bypass the system private window picker and directly access your screen and audio\") needs no rule of its own: it is a UserNotificationCenter dialog with an Allow button, so the rule above already clicks it -- confirmed in the log 2026-07-24 for both Claude and YOLO Mode itself. max_depth stays at the default 3 on purpose. Raising it to 8 was tried the same day and reverted: a single Terminal window yielded 200+ untitled buttons per probe, which is the loop starvation the depth limit exists to prevent.",
+  "_auth_fill": "auth_fill types the Mac login password (op://Bots/Mac login/password, scripts/mac_password.py) into a macOS auth prompt and presses the window's own default button -- 'Add Helper', 'Modify Settings', whatever Return would press. It fires on every SecurityAgent prompt, not an allowlist of apps: Nathan chose that on 2026-08-04 on the understanding that the high-priority Pushover -- sent after the fact, naming the app and quoting the dialog -- is the review step, so the alert must never be skipped. Two attempts per dialog per run, because a wrong password leaves the same dialog up and an uncapped retry loop locks the account. Off with `touch ~/.yolo_mode_no_password`. This is the one rule that hands out privilege rather than granting a capability: anything that can raise a password prompt now gets admin without a human present, which is the trade being made deliberately.",
+  "auth_fill": {
+    "op_item": "op://Bots/Mac login/password"
+  },
+  "_catch_all": "The last rule is a catch-all: any dialog-shaped window showing an Allow/OK button gets approved, whoever owns it. owner_not carves out the three kinds that stay manual. SecurityAgent, loginwindow and Keychain are how macOS asks Nathan to prove he is Nathan -- a watcher that clicks those turns his password prompt into a formality for whatever asked. 1Password releases vault secrets, so it stays manual EXCEPT the explicit 'Access Requested / Allow ... to get CLI access' dialog, which is auto-Authorized by its own rule above (buttons=['Authorize'] only, so Unlock and other 1Password prompts are untouched). That rule carries no title_any on purpose: the dialog's window title is just '1Password', not 'Access Requested' -- the visible heading lives in a static text inside the web view, not in the title bar. It was matched by title once and silently stopped firing (every `op` call hung to 'authorization timeout' from ~2026-08-04), so the gate is now the button title alone, which is the check that was doing the real work anyway. CoreServicesUIAgent is Gatekeeper, where the Allow-shaped button runs a program that was just downloaded, which is how a drive-by download becomes a running program. Everything else -- screen recording, mic, camera, files, automation, Shortcuts -- is auto-approved. The ScreenCaptureKit picker-bypass alert (\"X is requesting to bypass the system private window picker and directly access your screen and audio\") needs no rule of its own: it is a UserNotificationCenter dialog with an Allow button, so the rule above already clicks it -- confirmed in the log 2026-07-24 for both Claude and YOLO Mode itself. max_depth stays at the default 3 on purpose. Raising it to 8 was tried the same day and reverted: a single Terminal window yielded 200+ untitled buttons per probe, which is the loop starvation the depth limit exists to prevent.",
   "rules": [
     {
       "owner": "osascript",
@@ -17,7 +21,9 @@
     {
       "owner": "SecurityAgent",
       "dialog_sized": true,
-      "label": "macOS password / Touch ID prompt"
+      "auth_fill": true,
+      "ax_timeout": 3.0,
+      "label": "macOS password prompt"
     },
     {
       "owner": "UserNotificationCenter",
@@ -32,10 +38,6 @@
     },
     {
       "owner": "1Password",
-      "title_any": [
-        "Access Requested",
-        "CLI access"
-      ],
       "buttons": [
         "Authorize"
       ],
