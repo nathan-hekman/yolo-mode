@@ -4,9 +4,10 @@
 Keeps the repo free of binary art: the icon is drawn at install time, so it
 renders at the display's own resolution and needs no asset checked in.
 
-Two lines of YO / LO in a rounded square, on a warm gradient -- four letters
-across one 16pt tile would be unreadable, and this app's icon lives in the
-menubar and the Dock where small sizes matter most.
+A single "YOLO" wordmark in a rounded square on a warm gradient. The app's
+identity in the Dock is the word itself; the menubar shows the "YOLO" text
+title separately, so the icon optimizes for the Dock's larger sizes. The
+letters auto-fit the tile width so all four stay readable.
 
 Usage: make_icon.py <output.icns>
 """
@@ -32,7 +33,7 @@ from AppKit import (
 )
 
 SIZES = [16, 32, 64, 128, 256, 512, 1024]
-TOP, BOTTOM = "YO", "LO"
+WORD = "YOLO"
 
 # Warm orange-to-red: "YOLO" should not look like a system utility.
 START = (1.00, 0.58, 0.16)
@@ -57,19 +58,23 @@ def draw(size: int) -> bytes:
         NSColor.colorWithSRGBRed_green_blue_alpha_(*END, 1.0),
     ).drawInBezierPath_angle_(tile, -90.0)
 
-    # Heavy weight and tight tracking so the letters still read at 16pt.
-    font_size = size * 0.30
-    attrs = {
-        NSFontAttributeName: NSFont.systemFontOfSize_weight_(font_size, 0.62),
-        NSForegroundColorAttributeName: NSColor.whiteColor(),
-    }
-    line_gap = font_size * 0.94
-    for i, text in enumerate((TOP, BOTTOM)):
-        s = NSString.stringWithString_(text)
+    # Heavy weight; shrink the font until "YOLO" fits the tile's inner width so
+    # all four letters stay on one line and read even at small sizes.
+    s = NSString.stringWithString_(WORD)
+    target_w = size * 0.78
+    font_size = size * 0.34
+    for _ in range(12):
+        attrs = {
+            NSFontAttributeName: NSFont.systemFontOfSize_weight_(font_size, 0.62),
+            NSForegroundColorAttributeName: NSColor.whiteColor(),
+        }
         w, h = s.sizeWithAttributes_(attrs)
-        x = (size - w) / 2
-        y = size / 2 - line_gap * (i + 1) + line_gap * 0.98 + (line_gap - h) / 2
-        s.drawAtPoint_withAttributes_((x, y), attrs)
+        if w <= target_w:
+            break
+        font_size *= target_w / w
+    x = (size - w) / 2
+    y = (size - h) / 2
+    s.drawAtPoint_withAttributes_((x, y), attrs)
 
     NSGraphicsContext.restoreGraphicsState()
     return rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
