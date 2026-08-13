@@ -1,12 +1,29 @@
+<img src="docs/logo.png" alt="YOLO Mode" width="128">
+
 # YOLO Mode
 
-A macOS menubar app that tells you when something is actually waiting on you —
-a Claude Code tool asking permission, a macOS permission prompt, a 1Password
-approval — and, if you want, approves the routine ones for you.
+**The problem:** you come back to a Claude Code session that has done nothing
+for forty minutes, and the reason is a macOS dialog you never saw — a folder
+permission, a keychain prompt, a helper-tool installer, a Cloudflare checkbox
+on a browser tab that was never in front. The agent was never stuck on the
+work. It was stuck behind a window.
 
-It sends a Pushover alert that names the request, floats a panel you can click
-to jump back into the exact Claude Code session, and keeps one readable log of
-everything it saw.
+YOLO Mode watches for those dialogs, clicks Allow on the ones it recognises,
+and writes down every one it clicked. What it can't safely answer, it sends to
+your phone with the session's name and a link straight back into it.
+
+<img src="docs/menubar.png" alt="The YOLO Mode menu: status, today's counts, the last approval, and the toggles" width="380">
+
+Three parts:
+
+- **Auto-approval** — macOS permission dialogs get clicked, by an allowlist of
+  button titles, with Gatekeeper and 1Password held out. Cloudflare Turnstile
+  checkboxes get solved. Password prompts get answered from 1Password.
+- **Audit log** — every click is recorded before you hear about it: what was
+  granted, to which app, at what second, and whether the phone alert went out.
+  Two files, one machine-readable.
+- **Alerting** — the things it will not decide for you reach your phone,
+  named, with a button that reopens that exact Claude Code session.
 
 ## What an alert looks like
 
@@ -46,8 +63,16 @@ FaceTime and Terminal.
 
 ## Auto-approval
 
-On by default. When a permission dialog appears, YOLO Mode clicks its approve
-button and pushes an alert naming what was granted and how to undo it.
+On by default. When a macOS permission dialog appears — the ones that say an
+app "would like to access" your Documents folder, your camera, your
+microphone, your screen, another app's data — YOLO Mode clicks its approve
+button and pushes an alert naming what was granted and how to undo it. A
+session that used to sit there until you noticed it now carries on, and you
+read about the grant afterwards instead of blocking on it.
+
+Approval is never silent. The click is written to the audit log first and
+pushed to your phone second, so the record exists even if the phone alert
+doesn't go out.
 
 Guardrails:
 
@@ -199,13 +224,29 @@ For Claude Code alerts, point a `Notification` hook at the repo:
 - **Solve Cloudflare Now** — looks for a challenge regardless of the gate,
   for when one is sitting in a window that never came to the front.
 
-## Logs
+## The audit log
 
-- `~/Library/Logs/yolo-mode.log` — human-readable
-- `~/Library/Logs/yolo-mode-events.jsonl` — structured, what the window renders
+Anything that clicks Allow for you owes you a record of it. Everything YOLO
+Mode sees — approvals it granted, prompts it left alone, idle nudges it
+swallowed, its own errors — is appended to one place before anything else
+happens, by the window watcher, the Claude Code hook and the UI alike.
 
-Each line records whether a push actually went out (`push` vs `quiet`), so a
-missing alert is diagnosable without guessing.
+- `~/Library/Logs/yolo-mode-events.jsonl` — one JSON object per line, what the
+  window renders and what you grep. Fields: `ts`, `kind`
+  (`approval` / `idle` / `system` / `error`), `what` (the headline), `source`
+  (`claude` or `watcher`), `project`, `detail` (the dialog's own text),
+  `pushed`, and the full `session` uuid.
+- `~/Library/Logs/yolo-mode.log` — the same events as readable lines, which is
+  what *Open Log* opens.
+
+`pushed` is recorded as `push` or `quiet` on every line, so an alert you never
+got is a lookup rather than a guess: either it was suppressed on purpose or
+the push failed, and the log says which. The menubar shows today's counts and
+the last event; the window shows the recent ones colour-coded — red waiting on
+you, green already handled, grey noise. The JSONL keeps the last 500 events.
+
+Two questions it exists to answer: *what did this thing approve while I was
+away*, and *why did nothing reach my phone*.
 
 ## Notes for anyone changing this
 
