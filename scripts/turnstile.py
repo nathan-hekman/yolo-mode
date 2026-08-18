@@ -48,6 +48,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eventlog  # noqa: E402
 import macinput  # noqa: E402
+from macinput import autorelease_pool  # noqa: E402
 from eventlog import log  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -318,42 +319,45 @@ def watch_loop(global_off: Path, auto_off: Path, status_cb=None) -> None:
         f"{len(macinput.display_rects())} displays)")
 
     while True:
-        try:
-            if paused(global_off, auto_off):
-                time.sleep(3.0)
-                continue
-            now = time.time()
-
-            # Layer 1 -- interstitials on the scraper CDP ports.
-            for port, tid, title in challenged_targets(cfg):
-                if now < cooldown_until.get(port, 0):
+        # One pool per pass: the frontmost-app and display lookups below hand
+        # back autoreleased objects, and on this thread nothing else drains them.
+        with autorelease_pool():
+            try:
+                if paused(global_off, auto_off):
+                    time.sleep(3.0)
                     continue
-                log(f"turnstile: port {port} challenged: {title!r}")
-                prior = macinput.frontmost_app()
-                _activate_tab(port, tid)
-                macinput.activate_app(port_app(cfg, port))
-                time.sleep(0.5)
-                result = solve_visible(cfg, f"cdp:{port}")
-                macinput.activate_app(prior)
-                if result != "none":
-                    _record(f"port {port}", result)
-                    solves += result == "solved"
-                cooldown_until[port] = time.time() + float(cfg["cooldown"])
+                now = time.time()
 
-            # Layer 2 -- inline widget in the frontmost browser.
-            if time.time() >= cooldown_until.get("front", 0):
-                front = macinput.frontmost_app()
-                if front in browsers:
-                    result = solve_visible(cfg, f"front:{front}")
+                # Layer 1 -- interstitials on the scraper CDP ports.
+                for port, tid, title in challenged_targets(cfg):
+                    if now < cooldown_until.get(port, 0):
+                        continue
+                    log(f"turnstile: port {port} challenged: {title!r}")
+                    prior = macinput.frontmost_app()
+                    _activate_tab(port, tid)
+                    macinput.activate_app(port_app(cfg, port))
+                    time.sleep(0.5)
+                    result = solve_visible(cfg, f"cdp:{port}")
+                    macinput.activate_app(prior)
                     if result != "none":
-                        _record(front, result)
+                        _record(f"port {port}", result)
                         solves += result == "solved"
-                        cooldown_until["front"] = time.time() + float(cfg["cooldown"])
+                    cooldown_until[port] = time.time() + float(cfg["cooldown"])
 
-            if status_cb:
-                status_cb(solves)
-        except Exception as e:
-            log(f"turnstile loop error: {e}")
+                # Layer 2 -- inline widget in the frontmost browser.
+                if time.time() >= cooldown_until.get("front", 0):
+                    front = macinput.frontmost_app()
+                    if front in browsers:
+                        result = solve_visible(cfg, f"front:{front}")
+                        if result != "none":
+                            _record(front, result)
+                            solves += result == "solved"
+                            cooldown_until["front"] = time.time() + float(cfg["cooldown"])
+
+                if status_cb:
+                    status_cb(solves)
+            except Exception as e:
+                log(f"turnstile loop error: {e}")
         time.sleep(float(cfg["interval"]))
 
 

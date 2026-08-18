@@ -44,6 +44,7 @@ import mac_password  # noqa: E402
 import macinput  # noqa: E402
 import secrets_store as secrets  # noqa: E402
 from eventlog import log  # noqa: E402
+from macinput import autorelease_pool  # noqa: E402
 from macinput import mouse_click  # noqa: E402  (re-exported: callers use aw.mouse_click)
 
 from ApplicationServices import (  # type: ignore  # noqa: E402
@@ -652,6 +653,8 @@ def match(rule: dict, owner: str, title: str, w: float, h: float) -> bool:
 
 
 NO_BUTTON_TTL = 120   # seconds to remember "this window has no Allow button"
+SEEN_TTL = 3600       # seconds to remember a fired rule before forgetting the key
+MAX_SKIP_LOGGED = 500  # keys remembered for once-per-run skip logging
 MAX_PROBES_PER_SCAN = 3  # accessibility probes per pass, so one pass stays quick
 MAX_AX_NODES = 120       # nodes per probe; a permission dialog needs far fewer
 _no_button: dict[str, float] = {}
@@ -788,6 +791,18 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
         if key not in live:
             del streak[key]
 
+    # streak is keyed on window title, and a title can carry a filename or a
+    # command line, so the key space is effectively unbounded over a long run.
+    # streak clears itself above; these three do not, so age them out here.
+    for key, when in list(seen.items()):
+        if now - when > SEEN_TTL:
+            del seen[key]
+    for key, when in list(_no_button.items()):
+        if now - when > NO_BUTTON_TTL * 4:
+            del _no_button[key]
+    if len(_skip_logged) > MAX_SKIP_LOGGED:
+        _skip_logged.clear()
+
 
 def start_turnstile(status_cb=None) -> None:
     """Run the Turnstile solver on its own thread.
@@ -837,21 +852,24 @@ def watch_loop(status_cb=None, turnstile_cb=None) -> None:
             log(f"could not raise the accessibility prompt: {e}")
     start_turnstile(turnstile_cb)
     while True:
-        paused = OFF_FLAG.exists()
-        if status_cb:
-            status_cb(paused)
-        if not paused:
-            try:
-                started = time.time()
-                scan(rules, seen, streak)
-                elapsed = time.time() - started
-                # A poll pass should take milliseconds. When it does not, a
-                # real dialog can come and go between passes -- worth saying so
-                # rather than leaving it to be inferred from silence.
-                if elapsed > 3:
-                    log(f"slow scan: {elapsed:.1f}s")
-            except Exception as e:
-                log(f"scan error: {e}")
+        # One pool per pass. Every window list and accessibility node this pass
+        # reads is autoreleased, and on a non-main thread only this drains them.
+        with autorelease_pool():
+            paused = OFF_FLAG.exists()
+            if status_cb:
+                status_cb(paused)
+            if not paused:
+                try:
+                    started = time.time()
+                    scan(rules, seen, streak)
+                    elapsed = time.time() - started
+                    # A poll pass should take milliseconds. When it does not, a
+                    # real dialog can come and go between passes -- worth saying
+                    # so rather than leaving it to be inferred from silence.
+                    if elapsed > 3:
+                        log(f"slow scan: {elapsed:.1f}s")
+                except Exception as e:
+                    log(f"scan error: {e}")
         time.sleep(POLL_SECS)
 
 

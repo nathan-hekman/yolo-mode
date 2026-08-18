@@ -49,6 +49,29 @@ from Quartz import (  # type: ignore
 MAX_DISPLAYS = 8
 
 
+# ── autorelease pool ───────────────────────────────────────────────────────
+# Every Quartz/AppKit/accessibility call hands back an autoreleased Objective-C
+# object. On the main thread AppKit's run loop drains those between events; on a
+# plain Python thread nothing ever does, so a `while True` poll loop holds on to
+# every window list, every AX node and every NSString it ever read. Left alone
+# the watcher's heap passed 2.9 GB in a week. Each pass through a polling loop
+# gets its own pool, and the pass's garbage goes when the pool does.
+try:  # PyObjC 4+
+    from objc import autorelease_pool  # type: ignore  # noqa: F401
+except ImportError:  # pragma: no cover - older PyObjC
+    import contextlib
+
+    from Foundation import NSAutoreleasePool  # type: ignore
+
+    @contextlib.contextmanager
+    def autorelease_pool():  # type: ignore[no-redef]
+        pool = NSAutoreleasePool.alloc().init()
+        try:
+            yield
+        finally:
+            del pool
+
+
 # ── mouse ──────────────────────────────────────────────────────────────────
 def mouse_move(x: float, y: float) -> None:
     CGEventPost(
