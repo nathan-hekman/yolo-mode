@@ -27,12 +27,18 @@ TWO WAYS IN, IN ORDER
 
 Create the service account by hand, in a terminal, never from an agent session:
 
-    op service-account create yolo-mode --vault Bots:read_items \
-      --expires-in 365d
-    # paste the token into ~/.config/yolo-mode/op-token, then:
+    op service-account create yolo-mode --vault Bots:read_items
+    # the command prints a paragraph, not a bare token -- keep only the token:
+    grep -oE 'ops_[A-Za-z0-9_.=-]+' <output> > ~/.config/yolo-mode/op-token
     chmod 600 ~/.config/yolo-mode/op-token
 
-The token is printed once and would otherwise land in a session transcript.
+No --expires-in: 1Password caps it at 90 days, and a token that dies
+mid-automation is a worse failure than a long-lived read-only one scoped to a
+single vault. Verified 2026-08-19 -- with this token `op vault list` shows
+Bots and nothing else, and reading Private fails outright.
+
+The token is printed once and would otherwise land in a session transcript, so
+redirect the command's output straight to the file and never echo it.
 """
 from __future__ import annotations
 
