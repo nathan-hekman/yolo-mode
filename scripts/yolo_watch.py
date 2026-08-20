@@ -53,9 +53,11 @@ from ApplicationServices import (  # type: ignore  # noqa: E402
     AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication,
     AXUIElementPerformAction,
+    AXUIElementSetAttributeValue,
     AXValueGetValue,
     kAXChildrenAttribute,
     kAXFocusedAttribute,
+    kAXFocusedWindowAttribute,
     kAXPositionAttribute,
     kAXPressAction,
     kAXRoleAttribute,
@@ -68,7 +70,9 @@ from ApplicationServices import (  # type: ignore  # noqa: E402
     kAXWindowsAttribute,
 )
 from Quartz import (  # type: ignore  # noqa: E402
+    CGEventPost,
     CGWindowListCopyWindowInfo,
+    kCGHIDEventTap,
     kCGNullWindowID,
     kCGWindowListExcludeDesktopElements,
     kCGWindowListOptionOnScreenOnly,
@@ -81,9 +85,12 @@ OFF_FLAG = Path.home() / ".yolo_mode_off"
 
 
 
-POLL_SECS = 2.0
+POLL_SECS = 0.5
 COOLDOWN_SECS = 300     # per dialog identity
-CONFIRM_SCANS = 3       # polls a window must persist before it counts
+CONFIRM_SCANS = 2       # polls a window must persist before it counts
+# At POLL_SECS = 0.5 that is a one-second wait, down from six. The confirm
+# still does its job -- it throws out windows that flicker through the
+# window list -- and a rule can set its own confirm_scans to go faster.
 AX_TIMEOUT = 0.6        # seconds per accessibility call, so a stuck app can't
                         # stall the poll loop
 
@@ -254,6 +261,114 @@ def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth
         return None
     except Exception as e:
         log(f"auto-approve error ({owner}): {e}")
+        return None
+
+# Apps whose accessibility tree stays empty until a client asks for it.
+# 1Password renders its dialogs in a web view, and WebKit only publishes that
+# tree to a process that sets AXManualAccessibility. Without it the Authorize
+# prompt reads back as one empty AXGroup with no buttons at any depth, which
+# is why the CLI-access rule never fired and every `op` read hung to an
+# authorization timeout (measured 2026-08-19). The flag has to be set BEFORE
+# the dialog is built -- setting it on a dialog already on screen leaves that
+# one blank -- so it is set the first time each process is seen, not at click
+# time. It sticks for the life of that process.
+MANUAL_AX_OWNERS = ("1Password",)
+_manual_ax_pids: set[int] = set()
+
+
+def _enable_manual_accessibility(owner: str, pid: int) -> None:
+    if pid in _manual_ax_pids or not pid:
+        return
+    if not any(o.lower() in owner.lower() for o in MANUAL_AX_OWNERS):
+        return
+    _manual_ax_pids.add(pid)
+    if not AXIsProcessTrusted():
+        return
+    try:
+        app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, AX_TIMEOUT)
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility", True)
+        log(f"asked {owner} (pid {pid}) to publish its accessibility tree")
+    except Exception as e:
+        log(f"manual accessibility failed for {owner}: {e}")
+
+
+def _default_key_allowed(rule: dict, owner: str) -> bool:
+    """Is the Return keystroke in bounds for this dialog right now?
+
+    require_process names the command the dialog is blocking. Sending Return
+    when nothing is waiting would answer a prompt nobody asked for, so the
+    check is a precondition, not a nicety.
+    """
+    waiting = rule.get("require_process")
+    if waiting and not _process_running(waiting):
+        log(f"default-key: no {waiting} process waiting; leaving the {owner} dialog alone")
+        return False
+    return True
+
+
+def _process_running(name: str) -> bool:
+    """True if a process with this exact name is alive.
+
+    The gate on the Return keystroke: 1Password's CLI-access dialog is only
+    ever answered while an `op` command is actually blocked on it.
+    """
+    try:
+        return subprocess.run(["/usr/bin/pgrep", "-x", name],
+                              capture_output=True, timeout=3).returncode == 0
+    except Exception:
+        return False
+
+
+def press_default_key(owner: str, pid: int, expect_size: tuple | None = None,
+                      ax_timeout: float = AX_TIMEOUT) -> str | None:
+    """Approve a dialog by pressing Return on it, with no button to click.
+
+    1Password hides its dialogs from the accessibility API outright: the
+    Authorize prompt's window answers with one empty AXGroup and no buttons at
+    any depth, with or without AXManualAccessibility (measured 2026-08-19).
+    Both click routes need a button element, so both were dead -- which is why
+    the CLI-access rule quietly stopped firing and every `op` read hung.
+
+    Return presses whatever the dialog made its default button, which on the
+    Authorize prompt is Authorize. That is a blunt instrument, so it is fenced
+    in: the app must be frontmost, its focused window must be the dialog, and
+    the focused window's size must match the one the rule matched. If any of
+    those slip, the keystroke lands somewhere unintended, so it is not sent.
+
+    Returns the pressed button's name for the log, or None.
+    """
+    if not AXIsProcessTrusted():
+        _warn_missing_permission()
+        return None
+    try:
+        app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, ax_timeout)
+        window = _ax_value(app, kAXFocusedWindowAttribute)
+        if window is None:
+            log(f"default-key: {owner} has no focused window")
+            return None
+        if expect_size:
+            size = _ax_value(window, kAXSizeAttribute)
+            ok, sz = AXValueGetValue(size, kAXValueCGSizeType, None) if size else (False, None)
+            if not ok or abs(sz.width - expect_size[0]) > 2 or abs(sz.height - expect_size[1]) > 2:
+                log(f"default-key: focused {owner} window is {sz and (sz.width, sz.height)}, "
+                    f"not the {expect_size} dialog")
+                return None
+        macinput.activate_pid(pid)
+        time.sleep(0.5)
+        front = macinput.frontmost_app() or ""
+        if owner.lower() not in front.lower():
+            log(f"default-key: aborted, {front!r} is frontmost, not {owner!r}")
+            return None
+        from Quartz import CGEventCreateKeyboardEvent  # noqa: PLC0415
+
+        for down in (True, False):
+            CGEventPost(kCGHIDEventTap, CGEventCreateKeyboardEvent(None, 36, down))
+            time.sleep(0.05)
+        return "Return (default button)"
+    except Exception as e:
+        log(f"default-key error ({owner}): {e}")
         return None
 
 
@@ -494,7 +609,10 @@ def start_auth_fill(owner: str, pid: int, key: str, label: str,
                 # prompt is still sitting there, so fall back to the ordinary
                 # alert rather than going quiet -- silence here reads exactly
                 # like "handled".
-                pushed = notify(label, owner, "", "")
+                # A password prompt is the one dialog that must never pass
+                # unannounced, so this alert goes out at the same high
+                # priority as a successful fill.
+                pushed = notify(label, owner, "", "", priority=1)
                 eventlog.record(
                     "approval", label, source="watcher", project=owner,
                     detail="Password prompt not filled -- see the log",
@@ -551,7 +669,7 @@ def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = N
             _collect_buttons(child, out, depth + 1, budget, max_depth)
 
 
-def notify(label: str, owner: str, title: str, says: str) -> bool:
+def notify(label: str, owner: str, title: str, says: str, priority: int = 0) -> bool:
     """Push one alert. Headline is what is being asked, not where it lives."""
     headline = title or says or label
     body_lines = [says] if says and says != headline else []
@@ -575,7 +693,7 @@ def notify(label: str, owner: str, title: str, says: str) -> bool:
                 "token": api_token,
                 "title": f"Approve on Mac: {label}",
                 "message": "\n".join([l for l in [headline] + body_lines if l]),
-                "priority": 0,
+                "priority": priority,
             },
             timeout=12,
         )
@@ -675,6 +793,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
         title = info.get("kCGWindowName") or ""
         bounds = info.get("kCGWindowBounds") or {}
         w, h = bounds.get("Width", 0), bounds.get("Height", 0)
+        _enable_manual_accessibility(owner, info.get("kCGWindowOwnerPID") or 0)
         for rule in rules:
             if not match(rule, owner, title, w, h):
                 continue
@@ -686,7 +805,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     f"{w}x{h} streak={streak.get(key, 0)}")
             live.add(key)
             streak[key] = streak.get(key, 0) + 1
-            if streak[key] < CONFIRM_SCANS:
+            if streak[key] < rule.get("confirm_scans", CONFIRM_SCANS):
                 break
             # Per-rule cooldown: the self-test sets 0, because a test you
             # cannot repeat for five minutes is a test you stop running.
@@ -739,13 +858,49 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
             # own thread, and it never falls through to the click path.
             if rule.get("auth_fill"):
                 if AUTO_OFF_FLAG.exists() or AUTH_OFF_FLAG.exists():
+                    # Switched off means "don't type the password", not
+                    # "don't tell me". The prompt is still on screen waiting
+                    # for a human, and going quiet here left it sitting there
+                    # unannounced.
                     log(f"auth-fill: switched off, leaving {owner} prompt alone")
+                    says = dialog_text(owner) if not title else ""
+                    pushed = notify(rule["label"], owner, title, says, priority=1)
+                    eventlog.record(
+                        "approval", title or says or rule["label"],
+                        source="watcher", project=owner,
+                        detail="Password auto-fill is switched off -- answer it yourself",
+                        pushed=pushed,
+                    )
                 else:
                     start_auth_fill(owner, pid, key, rule["label"],
                                     rule.get("ax_timeout", AX_TIMEOUT))
                     break
 
             says = dialog_text(owner) if not title else ""
+
+            # Return first, where a rule asks for it. 1Password's Authorize
+            # prompt takes focus and makes Authorize its default button, so a
+            # single keystroke answers it in milliseconds -- against a
+            # twelve-level accessibility walk of a web view, which costs
+            # seconds and is the slowest probe the watcher runs.
+            if (rule.get("default_key") == "first" and not AUTO_OFF_FLAG.exists()
+                    and _default_key_allowed(rule, owner)):
+                clicked = press_default_key(
+                    owner, pid,
+                    tuple(rule["expect_size"]) if rule.get("expect_size") else None,
+                    rule.get("ax_timeout", AX_TIMEOUT),
+                )
+                if clicked:
+                    what = dialog_text(owner) if not title else title
+                    pushed = notify_auto_approved(owner, what or rule["label"], clicked)
+                    eventlog.record(
+                        "auto-approved",
+                        f"Approved ({clicked}): {what or rule['label']}",
+                        source="watcher", project=owner,
+                        detail="Revoke in System Settings > Privacy & Security",
+                        pushed=pushed,
+                    )
+                    break
 
             # Read the dialog before clicking, so the after-the-fact alert can
             # say what was granted and to whom.
@@ -775,6 +930,32 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                         pushed=pushed,
                     )
                     break
+                # No button to click. 1Password's Authorize prompt lands here
+                # whenever the app started before the watcher did, so its web
+                # view never got the AXManualAccessibility poke and publishes
+                # nothing. Return fires the dialog's own default button, which
+                # on that prompt is Authorize -- fenced in by
+                # press_default_key's frontmost + focused-window-size checks
+                # and by require_process, so the keystroke only goes out while
+                # the command that raised the dialog is still waiting.
+                if rule.get("default_key") and _default_key_allowed(rule, owner):
+                    clicked = press_default_key(
+                        owner, pid,
+                        tuple(rule["expect_size"]) if rule.get("expect_size") else None,
+                        rule.get("ax_timeout", AX_TIMEOUT),
+                    )
+                    if clicked:
+                        what = says or title or rule["label"]
+                        pushed = notify_auto_approved(owner, what, clicked)
+                        eventlog.record(
+                            "auto-approved",
+                            f"Approved ({clicked}): {what}",
+                            source="watcher",
+                            project=owner,
+                            detail="Revoke in System Settings > Privacy & Security",
+                            pushed=pushed,
+                        )
+                        break
 
             pushed = notify(rule["label"], owner, title, says)
             eventlog.record(
