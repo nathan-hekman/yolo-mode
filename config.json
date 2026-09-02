@@ -39,7 +39,8 @@
     {
       "owner": "1Password",
       "buttons": [
-        "Authorize"
+        "Authorize",
+        "Hekman Family"
       ],
       "dialog_sized": true,
       "auto_approve": true,
@@ -48,10 +49,14 @@
       "click_method": "mouse",
       "default_key": "first",
       "confirm_scans": 1,
-      "expect_size": [400, 325],
+      "expect_size": [
+        400,
+        325
+      ],
       "require_process": "op",
       "cooldown": 0,
-      "label": "1Password CLI-access authorize"
+      "label": "1Password CLI-access authorize",
+      "activate_if_needed": true
     },
     {
       "owner": "1Password",
@@ -101,7 +106,12 @@
   "_turnstile": "Cloudflare Turnstile auto-solver (scripts/turnstile.py), merged in from the standalone turnstile-autosolve. Nothing is captured unless a CDP port reports an interstitial or a browser is already frontmost. Needs Screen Recording granted to YOLO Mode. Pause it alone with ~/.turnstile_autosolve_off; the global pause and the auto-approve toggle also stop it.",
   "turnstile": {
     "enabled": true,
-    "ports": [9222, 9223, 9224, 9225],
+    "ports": [
+      9222,
+      9223,
+      9224,
+      9225
+    ],
     "interval": 2.0,
     "cooldown": 8.0,
     "settle": 6.0,

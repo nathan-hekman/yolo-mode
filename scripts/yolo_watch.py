@@ -87,6 +87,11 @@ OFF_FLAG = Path.home() / ".yolo_mode_off"
 
 POLL_SECS = 0.5
 COOLDOWN_SECS = 300     # per dialog identity
+# A rule may set cooldown 0 so it retries the CLICK every poll. That must not
+# also mean one Pushover per poll: a dialog the watcher cannot answer used to
+# send an alert a second until it was dismissed (observed 2026-09-01 on
+# 1Password's CLI-access prompt). Alerting has its own floor.
+PUSH_COOLDOWN_SECS = 300
 CONFIRM_SCANS = 2       # polls a window must persist before it counts
 # At POLL_SECS = 0.5 that is a one-second wait, down from six. The confirm
 # still does its job -- it throws out windows that flicker through the
@@ -304,7 +309,40 @@ def _default_key_allowed(rule: dict, owner: str) -> bool:
     if waiting and not _process_running(waiting):
         log(f"default-key: no {waiting} process waiting; leaving the {owner} dialog alone")
         return False
+    # press_default_key refuses unless the dialog's app is frontmost. Under
+    # automation something else usually is (Terminal, coreautha, a remote
+    # desktop), so the keystroke never went out and the prompt sat there
+    # alerting. Raising the app is safe precisely because require_process
+    # already proved the command that opened this dialog is still blocked on
+    # it -- and every other fence in press_default_key still has to pass.
+    if rule.get("activate_if_needed") and _frontmost_app() != owner:
+        _activate_app(owner)
     return True
+
+
+def _frontmost_app() -> str:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-e",
+             'tell application "System Events" to get name of first process whose frontmost is true'],
+            capture_output=True, text=True, timeout=5)
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _activate_app(owner: str) -> None:
+    """Bring `owner` forward so its dialog can take the Return keystroke."""
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript", "-e",
+             f'tell application "System Events" to set frontmost of '
+             f'(first process whose name is "{owner}") to true'],
+            capture_output=True, timeout=5)
+        log(f"default-key: raised {owner} to the front to answer its dialog")
+        time.sleep(0.4)  # let the window server finish the switch
+    except Exception as exc:
+        log(f"default-key: could not raise {owner}: {exc}")
 
 
 def _process_running(name: str) -> bool:
@@ -669,8 +707,26 @@ def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = N
             _collect_buttons(child, out, depth + 1, budget, max_depth)
 
 
+_last_push: dict[str, float] = {}
+_push_suppressed: set[str] = set()
+
+
 def notify(label: str, owner: str, title: str, says: str, priority: int = 0) -> bool:
-    """Push one alert. Headline is what is being asked, not where it lives."""
+    """Push one alert. Headline is what is being asked, not where it lives.
+
+    At most one alert per dialog identity per PUSH_COOLDOWN_SECS. A dialog the
+    watcher cannot answer stays on screen, so without this floor every poll
+    re-alerts about the same prompt.
+    """
+    push_key = f"{label}|{owner}|{title}"
+    now = time.time()
+    if now - _last_push.get(push_key, 0) < PUSH_COOLDOWN_SECS:
+        if push_key not in _push_suppressed:
+            _push_suppressed.add(push_key)
+            log(f"push suppressed (already alerted within {PUSH_COOLDOWN_SECS}s): {push_key}")
+        return False
+    _last_push[push_key] = now
+    _push_suppressed.discard(push_key)
     headline = title or says or label
     body_lines = [says] if says and says != headline else []
     body_lines.append(f"App: {owner}")
@@ -981,6 +1037,10 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
     for key, when in list(_no_button.items()):
         if now - when > NO_BUTTON_TTL * 4:
             del _no_button[key]
+    for key, when in list(_last_push.items()):
+        if now - when > PUSH_COOLDOWN_SECS * 4:
+            del _last_push[key]
+            _push_suppressed.discard(key)
     if len(_skip_logged) > MAX_SKIP_LOGGED:
         _skip_logged.clear()
 
