@@ -411,6 +411,18 @@ def press_default_key(owner: str, pid: int, expect_size: tuple | None = None,
         for down in (True, False):
             CGEventPost(kCGHIDEventTap, CGEventCreateKeyboardEvent(None, 36, down))
             time.sleep(0.05)
+        # Check it worked. Return sometimes lands with no default button set
+        # and the dialog stays up; that was reported as "Approved" and the
+        # prompt sat there (2026-09-18). If the dialog is still focused,
+        # return None so the caller falls through to the button click.
+        time.sleep(0.8)
+        if expect_size:
+            still = _ax_value(app, kAXFocusedWindowAttribute)
+            size = _ax_value(still, kAXSizeAttribute) if still is not None else None
+            ok, sz = AXValueGetValue(size, kAXValueCGSizeType, None) if size else (False, None)
+            if ok and abs(sz.width - expect_size[0]) <= 2 and abs(sz.height - expect_size[1]) <= 2:
+                log(f"default-key: {owner} dialog still up after Return; trying the button")
+                return None
         return "Return (default button)"
     except Exception as e:
         log(f"default-key error ({owner}): {e}")
