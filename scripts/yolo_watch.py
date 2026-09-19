@@ -955,7 +955,10 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                 )
                 if clicked:
                     what = dialog_text(owner) if not title else title
-                    pushed = notify_auto_approved(owner, what or rule["label"], clicked)
+                    pushed = (
+                        False if rule.get("silent")
+                        else notify_auto_approved(owner, what or rule["label"], clicked)
+                    )
                     eventlog.record(
                         "auto-approved",
                         f"Approved ({clicked}): {what or rule['label']}",
@@ -1009,7 +1012,10 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     )
                     if clicked:
                         what = says or title or rule["label"]
-                        pushed = notify_auto_approved(owner, what, clicked)
+                        pushed = (
+                            False if rule.get("silent")
+                            else notify_auto_approved(owner, what, clicked)
+                        )
                         eventlog.record(
                             "auto-approved",
                             f"Approved ({clicked}): {what}",

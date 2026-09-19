@@ -56,7 +56,8 @@
       "require_process": "op",
       "cooldown": 0,
       "label": "1Password CLI-access authorize",
-      "activate_if_needed": true
+      "activate_if_needed": true,
+      "silent": true
     },
     {
       "owner": "1Password",
