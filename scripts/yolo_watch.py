@@ -244,6 +244,13 @@ def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth
         AXUIElementSetMessagingTimeout(app, ax_timeout)
         found: list[tuple[str, object]] = []
         for window in _ax_value(app, kAXWindowsAttribute) or []:
+            # Dialog-sized windows only. The walk once reached 1Password's
+            # 1024x800 main window and mouse-clicked "Hekman Family" in its
+            # sidebar, then pushed that as an approval (2026-09-18).
+            size = _ax_value(window, kAXSizeAttribute)
+            ok, sz = AXValueGetValue(size, kAXValueCGSizeType, None) if size else (False, None)
+            if ok and (sz.width > 700 or sz.height > 550):
+                continue
             _collect_buttons(window, found, max_depth=max_depth)
         for title, element in found:
             if title in buttons:
