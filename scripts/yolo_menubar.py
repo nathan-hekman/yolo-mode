@@ -292,6 +292,21 @@ class _WindowTarget(NSObject):
         self.owner.refresh()
 
 
+# Off-flags for features that live outside the watcher. Each script checks its
+# own flag, so the toggle works even when the menubar app is not running.
+ROUTINE_OFF_FLAG = Path.home() / ".yolo_mode_no_desktop_routine"
+TITLE_OFF_FLAG = Path.home() / ".claude" / "auto-title.off"
+
+
+def _flip(flag: Path, what: str) -> None:
+    if flag.exists():
+        flag.unlink(missing_ok=True)
+        eventlog.log(f"{what} enabled")
+    else:
+        flag.touch()
+        eventlog.log(f"{what} disabled")
+
+
 class YoloApp(rumps.App):
     def __init__(self):
         super().__init__(name="YOLO Mode", title=TITLE_ARMED, quit_button=None)
@@ -304,6 +319,12 @@ class YoloApp(rumps.App):
         )
         self.turnstile_item = rumps.MenuItem(
             "Auto-solve Cloudflare checks", callback=self.toggle_turnstile
+        )
+        self.routine_item = rumps.MenuItem(
+            "Create routines through Desktop", callback=self.toggle_routine
+        )
+        self.title_item = rumps.MenuItem(
+            "Auto-rename Claude sessions", callback=self.toggle_title
         )
         self.menu = [
             self.status_item,
@@ -319,6 +340,8 @@ class YoloApp(rumps.App):
             None,
             self.auto_item,
             self.turnstile_item,
+            self.routine_item,
+            self.title_item,
             self.pause_item,
             rumps.MenuItem("Quit", callback=self.quit_app),
         ]
@@ -387,6 +410,8 @@ class YoloApp(rumps.App):
         self.count_item.title = f"Sent to phone today: {pushed}  (of {total} events)"
         self.auto_item.state = 0 if aw.AUTO_OFF_FLAG.exists() else 1
         self.turnstile_item.state = 0 if TURNSTILE_OFF_FLAG.exists() else 1
+        self.routine_item.state = 0 if ROUTINE_OFF_FLAG.exists() else 1
+        self.title_item.state = 0 if TITLE_OFF_FLAG.exists() else 1
         if self.turnstile_solves:
             self.turnstile_item.title = (
                 f"Auto-solve Cloudflare checks ({self.turnstile_solves} today)"
@@ -448,6 +473,14 @@ class YoloApp(rumps.App):
         else:
             turnstile.OFF_FLAG.touch()
             eventlog.log("turnstile auto-solve disabled")
+
+    def toggle_routine(self, _):
+        """desktop_routine.py: create local routines via Desktop's own tool."""
+        _flip(ROUTINE_OFF_FLAG, "desktop routine creation")
+
+    def toggle_title(self, _):
+        """~/.claude/hooks/auto-title.py names sessions "<model> · <Project> · <topic>"."""
+        _flip(TITLE_OFF_FLAG, "session auto-rename")
 
     def solve_turnstile(self, _):
         """Solve whatever challenge is on screen right now, on demand.

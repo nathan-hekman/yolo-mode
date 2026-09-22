@@ -25,7 +25,9 @@ existing shim's body is passed as the prompt (--from-skill) rather than kept.
 Usage:
   desktop_routine.py <id> --fire-at 2026-09-25T09:00:00-05:00 --from-skill PATH
   desktop_routine.py <id> --cron "7 9 * * *" --prompt "..." --title "..."
-Exit 0 = registered, 1 = not registered, 2 = gave up waiting for idle.
+Exit 0 = registered, 1 = not registered, 2 = gave up waiting for idle,
+3 = switched off in the YOLO Mode menu (~/.yolo_mode_no_desktop_routine);
+callers then fall back to scrape-collection/scripts/add_scheduled_task.py.
 """
 from __future__ import annotations
 
@@ -150,6 +152,10 @@ def main():
     ap.add_argument("--idle", type=int, default=60, help="seconds of user idle required first")
     ap.add_argument("--max-wait", type=int, default=3600, help="give up after this long without idle")
     a = ap.parse_args()
+
+    if os.path.exists(f"{HOME}/.yolo_mode_no_desktop_routine"):
+        print("off: Create routines through Desktop is unchecked in YOLO Mode")
+        sys.exit(3)
 
     prompt = a.prompt or skill_body(a.from_skill)
     sched = f'fireAt "{a.fire_at}"' if a.fire_at else f'cronExpression "{a.cron}"'
