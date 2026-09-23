@@ -144,6 +144,24 @@ because macOS attributes a click to the binary that makes it — the osascript
 route would require granting Accessibility to `/usr/bin/osascript`, letting any
 script on the machine click any dialog.
 
+## When a dialog will not clear
+
+Retrying is not the same as working. With 1Password locked, macOS puts its
+Touch ID / password sheet in front of the Authorize prompt and every Return
+misses. So each dialog gets a try count, reset when it closes:
+
+- Tries 4 and 7: YOLO Mode looks instead of pressing blind. A password sheet
+  already in front goes to the password path above. Otherwise it screenshots
+  the main display and asks Claude (Haiku, through the local `claude` CLI) for
+  one step: click a button, enter the password, press Return, or nothing. A
+  click only happens on an approve-type label (never Cancel / Deny / Lock) and
+  only on a 1Password or macOS-auth window. Screen text is treated as untrusted.
+- Try 10: it stops retrying and sends a high-priority Pushover. It stays quiet
+  until the dialog closes.
+
+The look needs the `claude` CLI signed in (`claude` then `/login`); if it is
+not, the look is skipped and the give-up alert still fires.
+
 ## Cloudflare Turnstile
 
 The same idea, one layer down: when a "Verify you are human" checkbox appears,

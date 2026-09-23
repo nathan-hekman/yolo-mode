@@ -854,6 +854,148 @@ _no_button: dict[str, float] = {}
 _skip_logged: set[str] = set()
 
 
+# ── stuck dialogs ──────────────────────────────────────────────────────────
+# A cooldown-0 rule retries every poll, and "retried" is not "worked": with
+# 1Password locked, macOS's Touch ID sheet (coreautha) sits in front of the
+# Authorize prompt, every Return misses, and the watcher logged "Approved" once
+# a second for as long as nobody looked (2026-09-23). So tries are counted per
+# dialog, a couple of them are spent looking at the screen instead of pressing
+# blind, and after GIVE_UP_AFTER the watcher stops and says so, loudly.
+GIVE_UP_AFTER = 10
+LOOK_AT_TRIES = (4, 7)
+# Only these apps' windows may be clicked or typed into on the strength of a
+# screenshot. Screen text is untrusted; where the click lands is not.
+LOOK_OWNERS = ("1Password", "coreautha", "coreauthd", "SecurityAgent")
+LOOK_SAFE_WORDS = ("authorize", "allow", "unlock", "use password", "continue",
+                   "approve", "ok", "hekman family")
+LOOK_DENY_WORDS = ("cancel", "deny", "don't", "delete", "remove", "quit",
+                   "sign out", "lock")
+_tries: dict[str, int] = {}
+_looking: set[str] = set()
+
+
+def _trusted_window_at(x: float, y: float) -> str | None:
+    """Owner of the topmost on-screen window under (x, y), if it is one of
+    LOOK_OWNERS; otherwise None."""
+    infos = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    ) or []
+    for info in infos:  # front to back
+        b = info.get("kCGWindowBounds") or {}
+        if (info.get("kCGWindowLayer", 0) >= 0
+                and b.get("X", 0) <= x <= b.get("X", 0) + b.get("Width", 0)
+                and b.get("Y", 0) <= y <= b.get("Y", 0) + b.get("Height", 0)
+                and b.get("Width", 0) > 40 and b.get("Height", 0) > 40):
+            owner = info.get("kCGWindowOwnerName") or ""
+            return owner if any(o.lower() == owner.lower() for o in LOOK_OWNERS) else None
+    return None
+
+
+def _front_trusted() -> tuple[str, int] | None:
+    from AppKit import NSWorkspace  # type: ignore  # noqa: PLC0415
+
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    name = (app.localizedName() or "") if app else ""
+    if app and any(o.lower() == name.lower() for o in LOOK_OWNERS):
+        return name, app.processIdentifier()
+    return None
+
+
+def _try_password(key: str, label: str) -> bool:
+    """Hand the front app to the auth-fill path if it is asking for a password.
+    auth_fill keeps its own fences: secure field, frontmost, char count, two
+    attempts."""
+    front = _front_trusted()
+    if front and _find_secure_field(front[1]):
+        start_auth_fill(front[0], front[1], f"{key}|look", label)
+        return True
+    return False
+
+
+def look_and_act(owner: str, key: str, label: str, tries: int) -> None:
+    """Off-thread: screenshot, ask Claude for one step, take it if in bounds."""
+    import threading  # noqa: PLC0415
+
+    if key in _looking:
+        return
+    _looking.add(key)
+
+    def run() -> None:
+        try:
+            with autorelease_pool():
+                # Cheap check first: a password sheet already in front needs
+                # no screenshot to recognise.
+                if _try_password(key, label):
+                    log(f"look: password sheet in front of {owner}; filling it")
+                    return
+                import screen_look  # noqa: PLC0415
+
+                a = screen_look.look(owner, label, tries)
+                if not a or a["action"] == "none":
+                    return
+                if a["action"] == "password":
+                    if not _try_password(key, label):
+                        log("look: said password, but no trusted password field is in front")
+                    return
+                if a["action"] == "return":
+                    if _front_trusted():
+                        for down in (True, False):
+                            CGEventPost(kCGHIDEventTap,
+                                        macinput.CGEventCreateKeyboardEvent(None, 36, down))
+                        log("look: pressed Return")
+                    else:
+                        log("look: said Return, but a trusted dialog is not in front")
+                    return
+                if a["action"] == "click":
+                    btn = a["button"].lower()
+                    if any(w in btn for w in LOOK_DENY_WORDS) or not any(
+                            w in btn for w in LOOK_SAFE_WORDS):
+                        log(f"look: refused to click {a['button']!r} (not an approve button)")
+                        return
+                    hit = _trusted_window_at(a["x"], a["y"])
+                    if not hit:
+                        log(f"look: refused click at ({a['x']:.0f},{a['y']:.0f}); "
+                            "not on a 1Password / macOS auth window")
+                        return
+                    macinput.mouse_click(a["x"], a["y"])
+                    log(f"look: clicked {a['button']!r} on {hit}")
+                    eventlog.record("auto-approved", f"Looked and clicked {a['button']!r}",
+                                    source="watcher", project=hit,
+                                    detail=a.get("why", ""), pushed=False)
+                    # "Use Password..." swaps Touch ID for a password field.
+                    time.sleep(1.0)
+                    _try_password(key, label)
+        except Exception as e:
+            log(f"look thread error ({owner}): {e}")
+        finally:
+            _looking.discard(key)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def count_try(key: str, owner: str, label: str) -> bool:
+    """Record one more attempt on this dialog. False means: don't press
+    anything this poll (looking instead, or already given up)."""
+    tries = _tries[key] = _tries.get(key, 0) + 1
+    if tries > GIVE_UP_AFTER:
+        return False
+    if tries == GIVE_UP_AFTER:
+        log(f"gave up on {owner} dialog after {tries} tries: {key}")
+        pushed = notify(f"STUCK after {tries} tries: {label}", owner, "",
+                        f"{owner} dialog would not clear. 1Password may be locked "
+                        "-- unlock it on the Mac. YOLO Mode stopped retrying.",
+                        priority=1)
+        eventlog.record("error", f"Gave up on {label} after {tries} tries",
+                        source="watcher", project=owner,
+                        detail="Stopped retrying until the dialog closes", pushed=pushed)
+        return False
+    if tries in LOOK_AT_TRIES:
+        look_and_act(owner, key, label, tries)
+        return False
+    return key not in _looking
+
+
 def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> None:
     infos = CGWindowListCopyWindowInfo(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -927,6 +1069,12 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     break
 
             seen[key] = now
+
+            if (not rule.get("auth_fill")
+                    and (rule.get("auto_approve") or rule.get("default_key"))
+                    and not AUTO_OFF_FLAG.exists()
+                    and not count_try(key, owner, rule["label"])):
+                break
 
             # Password prompts before anything else: this rule types a secret
             # rather than clicking a grant, so it has its own switch and its
@@ -1052,6 +1200,10 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
     for key in list(streak):
         if key not in live:
             del streak[key]
+    # A dialog that closed starts over at zero tries the next time it opens.
+    for key in list(_tries):
+        if key not in live:
+            del _tries[key]
 
     # streak is keyed on window title, and a title can carry a filename or a
     # command line, so the key space is effectively unbounded over a long run.
