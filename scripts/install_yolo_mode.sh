@@ -167,6 +167,11 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 echo "Installed + started $LABEL. Log: $OUTLOG"
 
+# ---- op wrapper: Bots-vault reads skip the 1Password Authorize prompt -------
+# See scripts/op_wrapper.sh. ~/.local/bin sits ahead of /opt/homebrew/bin.
+mkdir -p "$HOME/.local/bin"
+ln -sf "$(cd "$(dirname "$0")" && pwd)/op_wrapper.sh" "$HOME/.local/bin/op"
+
 # ---- Screen Recording, for the Turnstile solver ---------------------------
 # Without it the capture still succeeds and simply returns the desktop with
 # every window missing, so the solver would sit there matching nothing and
