@@ -8,7 +8,7 @@ in front of it, so every Return lands on the wrong window and the watcher logs
 "Approved" forever (observed 2026-09-23).
 
 This module takes one screenshot, hands it to Claude through the local
-`claude` CLI (no API key to manage -- it uses the Mac's existing login), and
+`claude` CLI, authenticated by a setup-token read from 1Password, and
 asks for exactly one action from a fixed menu. It does not act. The caller
 decides whether the answer is in bounds, because text on screen can say
 anything and the model reading it is not the one that gets to decide what is
@@ -17,17 +17,40 @@ safe to click.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 
+import mac_password
 import macinput
 from eventlog import log
 
 CLAUDE = Path.home() / ".local/bin/claude"
 MODEL = "claude-haiku-4-5-20251001"
 TIMEOUT = 90
+# Long-lived token from `claude setup-token`, kept in the Bots vault so the
+# look does not die when the CLI's browser login expires (it did, 2026-09-23,
+# and re-login needs a human click on an Authorize page that blocks automation).
+TOKEN_REF = "op://Bots/Claude Code token/credential"
+
+
+def _claude_env() -> dict:
+    env = dict(os.environ)
+    try:
+        r = subprocess.run([mac_password.OP, "read", TOKEN_REF, "--no-newline"],
+                           capture_output=True, text=True, timeout=45,
+                           env=mac_password._environment())
+        if r.returncode == 0 and r.stdout:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = r.stdout
+        else:
+            log(f"look: no Claude token from 1Password ({r.stderr.strip()[:120]}); "
+                "falling back to the CLI login")
+    except Exception as e:
+        log(f"look: token read failed ({e}); falling back to the CLI login")
+    return env
+
 
 PROMPT = """You are helping an automation that approves a stuck macOS dialog.
 Read the screenshot at {path}. It is {w}x{h} pixels.
@@ -82,6 +105,7 @@ def look(owner: str, label: str, tries: int) -> dict | None:
                  "--allowedTools", "Read", "--add-dir", tmp,
                  "--output-format", "text"],
                 capture_output=True, text=True, timeout=TIMEOUT, cwd=tmp,
+                env=_claude_env(),
             )
         m = re.search(r"\{.*\}", out.stdout, re.S)
         if not m:
