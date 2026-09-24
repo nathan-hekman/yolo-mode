@@ -46,6 +46,7 @@
       "auto_approve": true,
       "max_depth": 12,
       "ax_timeout": 3.0,
+      "walk_secs": 8,
       "click_method": "mouse",
       "default_key": "first",
       "confirm_scans": 1,

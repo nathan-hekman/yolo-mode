@@ -96,6 +96,7 @@ CONFIRM_SCANS = 2       # polls a window must persist before it counts
 # At POLL_SECS = 0.5 that is a one-second wait, down from six. The confirm
 # still does its job -- it throws out windows that flicker through the
 # window list -- and a rule can set its own confirm_scans to go faster.
+WALK_SECS = 1.5          # wall-clock cap per probe; rules raise it (walk_secs)
 AX_TIMEOUT = 0.6        # seconds per accessibility call, so a stuck app can't
                         # stall the poll loop
 
@@ -181,7 +182,8 @@ def _element_center(element):
 
 
 def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int = 3,
-                      ax_timeout: float = AX_TIMEOUT, seen_out: list | None = None):
+                      ax_timeout: float = AX_TIMEOUT, seen_out: list | None = None,
+                      walk_secs: float = WALK_SECS):
     """Return (title, element) for the first approve-looking button, or None.
 
     This doubles as the test for "is this actually a permission dialog?". A
@@ -205,8 +207,11 @@ def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int =
         # or its tree reads back truncated at random -- rules raise ax_timeout.
         AXUIElementSetMessagingTimeout(app, ax_timeout)
         found: list[tuple[str, object]] = []
+        deadline = time.monotonic() + walk_secs
         for window in _ax_value(app, kAXWindowsAttribute) or []:
-            _collect_buttons(window, found, max_depth=max_depth)
+            if time.monotonic() > deadline:
+                break
+            _collect_buttons(window, found, max_depth=max_depth, deadline=deadline)
         if seen_out is not None:
             seen_out.extend(t for t, _ in found)
         for title, element in found:
@@ -218,7 +223,8 @@ def find_allow_button(pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int =
 
 
 def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth: int = 3,
-                 ax_timeout: float = AX_TIMEOUT, click_method: str = "press") -> str | None:
+                 ax_timeout: float = AX_TIMEOUT, click_method: str = "press",
+                 walk_secs: float = WALK_SECS) -> str | None:
     """Click the approve button on a system permission dialog.
 
     Only buttons whose exact title is in ALLOW_BUTTONS are ever clicked -- this
@@ -243,7 +249,10 @@ def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth
         app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, ax_timeout)
         found: list[tuple[str, object]] = []
+        deadline = time.monotonic() + walk_secs
         for window in _ax_value(app, kAXWindowsAttribute) or []:
+            if time.monotonic() > deadline:
+                break
             # Dialog-sized windows only. The walk once reached 1Password's
             # 1024x800 main window and mouse-clicked "Hekman Family" in its
             # sidebar, then pushed that as an approval (2026-09-18).
@@ -251,7 +260,7 @@ def auto_approve(owner: str, pid: int, buttons: tuple = ALLOW_BUTTONS, max_depth
             ok, sz = AXValueGetValue(size, kAXValueCGSizeType, None) if size else (False, None)
             if ok and (sz.width > 700 or sz.height > 550):
                 continue
-            _collect_buttons(window, found, max_depth=max_depth)
+            _collect_buttons(window, found, max_depth=max_depth, deadline=deadline)
         for title, element in found:
             if title in buttons:
                 if click_method == "mouse":
@@ -696,7 +705,7 @@ def start_auth_fill(owner: str, pid: int, key: str, label: str,
 
 
 def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = None,
-                     max_depth: int = 3) -> None:
+                     max_depth: int = 3, deadline: float | None = None) -> None:
     """Walk the accessibility tree for buttons, within a strict budget.
 
     Buttons are rarely direct children of the window: permission dialogs nest
@@ -710,20 +719,28 @@ def _collect_buttons(element, out: list, depth: int = 0, budget: list | None = N
     AXWebArea) buries its buttons ~8 levels down, so those rules raise max_depth
     themselves. The MAX_AX_NODES budget still caps total work either way, so a
     deeper limit stays safe on a small dialog.
+
+    The node budget alone does not bound time: every node is two or three
+    calls, each allowed ax_timeout, so a hung app answering none of them held
+    one pass for 42 seconds (2026-09-23) while a system prompt sat unclicked.
+    deadline is the wall-clock cap that actually keeps the loop moving.
     """
     if budget is None:
         budget = [MAX_AX_NODES]
+    if deadline is None:
+        deadline = time.monotonic() + WALK_SECS
     if depth > max_depth or budget[0] <= 0:
         return
     for child in _ax_value(element, kAXChildrenAttribute) or []:
         budget[0] -= 1
-        if budget[0] <= 0:
+        if budget[0] <= 0 or time.monotonic() > deadline:
+            budget[0] = 0
             return
         role = _ax_value(child, kAXRoleAttribute)
         if role == "AXButton":
             out.append((_ax_value(child, kAXTitleAttribute) or "", child))
         else:
-            _collect_buttons(child, out, depth + 1, budget, max_depth)
+            _collect_buttons(child, out, depth + 1, budget, max_depth, deadline)
 
 
 _last_push: dict[str, float] = {}
@@ -849,6 +866,8 @@ NO_BUTTON_TTL = 120   # seconds to remember "this window has no Allow button"
 SEEN_TTL = 3600       # seconds to remember a fired rule before forgetting the key
 MAX_SKIP_LOGGED = 500  # keys remembered for once-per-run skip logging
 MAX_PROBES_PER_SCAN = 3  # accessibility probes per pass, so one pass stays quick
+# Owners of the macOS prompts that block a session. Handled first each pass.
+SYSTEM_OWNERS = ("UserNotificationCenter", "SecurityAgent", "CoreServicesUIAgent")
 MAX_AX_NODES = 120       # nodes per probe; a permission dialog needs far fewer
 _no_button: dict[str, float] = {}
 _skip_logged: set[str] = set()
@@ -1001,11 +1020,25 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
         kCGNullWindowID,
     ) or []
+    # System prompts first. They are cheap to answer and are the ones that
+    # block a session; handled in window-list order they could wait behind a
+    # slow probe of some ordinary app window in the same pass.
+    infos = sorted(infos, key=lambda i: (i.get("kCGWindowOwnerName") or "") not in SYSTEM_OWNERS)
     now = time.time()
     live: set[str] = set()
     probes = 0
+    prev_name = ""
 
+    # Which window a slow pass was spent on. "slow scan: 42s" alone said the
+    # loop stalled but not on whom, so the cause could only be guessed.
+    slowest = (0.0, "")
+    t0 = time.monotonic()
     for info in infos:
+        t1 = time.monotonic()
+        if t1 - t0 > slowest[0] and prev_name:
+            slowest = (t1 - t0, prev_name)
+        t0 = t1
+        prev_name = f"{info.get('kCGWindowOwnerName') or ''!r} {info.get('kCGWindowName') or ''!r}"
         owner = info.get("kCGWindowOwnerName") or ""
         title = info.get("kCGWindowName") or ""
         bounds = info.get("kCGWindowBounds") or {}
@@ -1045,7 +1078,8 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                 probes += 1
                 saw: list[str] = []
                 if not find_allow_button(pid, allowed, rule.get("max_depth", 3),
-                                         rule.get("ax_timeout", AX_TIMEOUT), saw):
+                                         rule.get("ax_timeout", AX_TIMEOUT), saw,
+                                         rule.get("walk_secs", WALK_SECS)):
                     _no_button[key] = now
                     # Name the rejected window and its buttons. A new system
                     # prompt whose Allow sits deeper than max_depth is
@@ -1138,6 +1172,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     rule.get("max_depth", 3),
                     rule.get("ax_timeout", AX_TIMEOUT),
                     rule.get("click_method", "press"),
+                    rule.get("walk_secs", WALK_SECS),
                 )
                 if clicked:
                     what = says or title or rule["label"]
@@ -1196,6 +1231,11 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                 pushed=pushed,
             )
             break
+
+    if time.monotonic() - t0 > slowest[0] and prev_name:
+        slowest = (time.monotonic() - t0, prev_name)
+    if slowest[0] > 2:
+        log(f"slow window: {slowest[0]:.1f}s on {slowest[1]}")
 
     for key in list(streak):
         if key not in live:
