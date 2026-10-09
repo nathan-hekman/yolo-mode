@@ -178,7 +178,7 @@ def push(title: str, message: str, session_id: str = "") -> bool:
         data = {
             "user": user_key,
             "token": api_token,
-            "title": title,
+            "title": secrets.tag(title),
             "message": message,
             "priority": 0,
         }

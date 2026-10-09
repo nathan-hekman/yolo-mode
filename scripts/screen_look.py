@@ -70,10 +70,40 @@ Reply with ONLY a JSON object, no prose:
 {{"action": "...", "button": "<exact visible button text or empty>", "x": <int pixel x of button center or 0>, "y": <int pixel y or 0>, "why": "<short reason>"}}"""
 
 
-def _display_bounds() -> tuple[float, float, float, float]:
-    from Quartz import CGDisplayBounds, CGMainDisplayID  # type: ignore  # noqa: PLC0415
+def _display_bounds(owner: str = "") -> tuple[float, float, float, float]:
+    """Bounds of the display showing `owner`'s front dialog-sized window.
 
-    b = CGDisplayBounds(CGMainDisplayID())
+    The main display alone missed it: 1Password lives on the second monitor,
+    and every look said "no dialog visible" while it sat there (2026-10-09).
+    """
+    from Quartz import (CGDisplayBounds, CGGetActiveDisplayList,  # type: ignore  # noqa: PLC0415
+                        CGMainDisplayID, CGWindowListCopyWindowInfo, kCGNullWindowID,
+                        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly)
+
+    target = None
+    if owner:
+        for info in CGWindowListCopyWindowInfo(
+                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                kCGNullWindowID) or []:
+            b = info.get("kCGWindowBounds") or {}
+            if ((info.get("kCGWindowOwnerName") or "").lower() != owner.lower()
+                    or b.get("Width", 0) < 120 or b.get("Height", 0) < 80):
+                continue
+            center = (b["X"] + b["Width"] / 2, b["Y"] + b["Height"] / 2)
+            if b["Width"] <= 700 and b["Height"] <= 550:
+                target = center  # the dialog itself
+                break
+            target = target or center  # the app's main window, same screen as a rule
+    display = CGMainDisplayID()
+    if target:
+        _, ids, n = CGGetActiveDisplayList(16, None, None)
+        for d in (ids or [])[:n]:
+            r = CGDisplayBounds(d)
+            if (r.origin.x <= target[0] < r.origin.x + r.size.width
+                    and r.origin.y <= target[1] < r.origin.y + r.size.height):
+                display = d
+                break
+    b = CGDisplayBounds(display)
     return b.origin.x, b.origin.y, b.size.width, b.size.height
 
 
@@ -89,7 +119,7 @@ def look(owner: str, label: str, tries: int) -> dict | None:
     try:
         import cv2  # noqa: PLC0415
 
-        x0, y0, w, h = _display_bounds()
+        x0, y0, w, h = _display_bounds(owner)
         img = macinput.grab_region(x0, y0, w, h)
         if img is None:
             log("look: screen grab failed")

@@ -367,11 +367,18 @@ def _process_running(name: str) -> bool:
     The gate on the Return keystroke: 1Password's CLI-access dialog is only
     ever answered while an `op` command is actually blocked on it.
     """
+    # `op daemon` is a long-lived background helper named "op" too. It never
+    # waits on a dialog, but it kept this gate open around the clock.
     try:
-        return subprocess.run(["/usr/bin/pgrep", "-x", name],
-                              capture_output=True, timeout=3).returncode == 0
+        out = subprocess.run(["/bin/ps", "-Ao", "args="],
+                             capture_output=True, text=True, timeout=3).stdout
     except Exception:
         return False
+    for line in out.splitlines():
+        args = line.split()
+        if args and Path(args[0]).name == name and args[1:2] != ["daemon"]:
+            return True
+    return False
 
 
 def press_default_key(owner: str, pid: int, expect_size: tuple | None = None,
@@ -436,6 +443,49 @@ def press_default_key(owner: str, pid: int, expect_size: tuple | None = None,
     except Exception as e:
         log(f"default-key error ({owner}): {e}")
         return None
+
+
+def click_corner_button(owner: str, info: dict, offset: tuple, sizes: list) -> str | None:
+    """Click a web-view dialog's default button at a fixed spot from its
+    bottom-right corner, then check the window went away.
+
+    Return stopped answering 1Password's Authorize prompt (2026-10-09): the
+    keystroke reached the dialog, the op read stayed blocked, and the watcher
+    logged "Approved" while the prompt came straight back. A mouse click on
+    Authorize does work. Fences: the window must be one of the dialog's known
+    sizes, it must be the frontmost window under the click point, and the
+    caller has already proved an `op` command is waiting on it.
+    """
+    from Quartz import kCGWindowListOptionAll  # noqa: PLC0415
+
+    b = info.get("kCGWindowBounds") or {}
+    w, h = b.get("Width", 0), b.get("Height", 0)
+    if not any(abs(w - sw) <= 2 and abs(h - sh) <= 2 for sw, sh in sizes):
+        return None
+    number = info.get("kCGWindowNumber")
+    x, y = b["X"] + w - offset[0], b["Y"] + h - offset[1]
+    for front in CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID) or []:
+        fb = front.get("kCGWindowBounds") or {}
+        if (front.get("kCGWindowLayer", 0) >= 0
+                and fb.get("X", 0) <= x <= fb.get("X", 0) + fb.get("Width", 0)
+                and fb.get("Y", 0) <= y <= fb.get("Y", 0) + fb.get("Height", 0)):
+            if front.get("kCGWindowNumber") != number:
+                log(f"corner-click: {front.get('kCGWindowOwnerName')!r} covers the "
+                    f"{owner} dialog; not clicking")
+                return None
+            break
+    macinput.mouse_click(x, y)
+    for _ in range(10):
+        time.sleep(0.2)
+        still = [i for i in CGWindowListCopyWindowInfo(
+            kCGWindowListOptionAll, kCGNullWindowID) or []
+            if i.get("kCGWindowNumber") == number and i.get("kCGWindowIsOnscreen")]
+        if not still:
+            return "Authorize (click)"
+    log(f"corner-click: {owner} dialog still up after the click")
+    return None
 
 
 AUTH_OFF_FLAG = Path.home() / ".yolo_mode_no_password"
@@ -633,7 +683,7 @@ def notify_auth_filled(owner: str, what: str, button: str) -> bool:
             data={
                 "user": user_key,
                 "token": api_token,
-                "title": f"Password entered: {owner}",
+                "title": secrets.tag(f"Password entered: {owner}"),
                 "message": (
                     f"{what}\nSubmitted: {button}\n"
                     "Not you? touch ~/.yolo_mode_no_password"
@@ -783,7 +833,7 @@ def notify(label: str, owner: str, title: str, says: str, priority: int = 0) -> 
             data={
                 "user": user_key,
                 "token": api_token,
-                "title": f"Approve on Mac: {label}",
+                "title": secrets.tag(f"Approve on Mac: {label}"),
                 "message": "\n".join([l for l in [headline] + body_lines if l]),
                 "priority": priority,
             },
@@ -827,7 +877,7 @@ def notify_auto_approved(owner: str, what: str, button: str) -> bool:
             data={
                 "user": user_key,
                 "token": api_token,
-                "title": f"Auto-approved: {owner}",
+                "title": secrets.tag(f"Auto-approved: {owner}"),
                 "message": (
                     f"{what}\nClicked: {button}\n"
                     "Undo in System Settings > Privacy & Security."
@@ -1135,6 +1185,22 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
 
             says = dialog_text(owner) if not title else ""
 
+            if (rule.get("corner_click") and not AUTO_OFF_FLAG.exists()
+                    and _default_key_allowed(rule, owner)):
+                clicked = click_corner_button(
+                    owner, info, tuple(rule["corner_click"]),
+                    rule.get("corner_sizes") or [rule.get("expect_size")])
+                if clicked:
+                    _tries.pop(key, None)
+                    eventlog.record(
+                        "auto-approved", f"Approved ({clicked}): {rule['label']}",
+                        source="watcher", project=owner,
+                        detail="Revoke in System Settings > Privacy & Security",
+                        pushed=False if rule.get("silent")
+                        else notify_auto_approved(owner, rule["label"], clicked),
+                    )
+                    break
+
             # Return first, where a rule asks for it. 1Password's Authorize
             # prompt takes focus and makes Authorize its default button, so a
             # single keystroke answers it in milliseconds -- against a
@@ -1148,6 +1214,10 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     rule.get("ax_timeout", AX_TIMEOUT),
                 )
                 if clicked:
+                    # Verified gone, so this dialog starts over. Without the
+                    # reset a burst of op reads -- each prompt answered fine --
+                    # added up to "STUCK after 10 tries" (2026-10-09).
+                    _tries.pop(key, None)
                     what = dialog_text(owner) if not title else title
                     pushed = (
                         False if rule.get("silent")
@@ -1206,6 +1276,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                         rule.get("ax_timeout", AX_TIMEOUT),
                     )
                     if clicked:
+                        _tries.pop(key, None)  # verified gone; see above
                         what = says or title or rule["label"]
                         pushed = (
                             False if rule.get("silent")

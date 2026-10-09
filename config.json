@@ -39,16 +39,17 @@
     {
       "owner": "1Password",
       "buttons": [
-        "Authorize",
-        "Hekman Family"
+        "Authorize"
       ],
+      "corner_click": [68, 40],
+      "corner_sizes": [[400, 325], [400, 459]],
       "dialog_sized": true,
       "auto_approve": true,
       "max_depth": 12,
       "ax_timeout": 3.0,
       "walk_secs": 8,
       "click_method": "mouse",
-      "default_key": "first",
+      "default_key": true,
       "confirm_scans": 1,
       "expect_size": [
         400,

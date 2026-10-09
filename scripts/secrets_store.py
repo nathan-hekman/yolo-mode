@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".config/yolo-mode/pushover.json"
@@ -34,3 +35,26 @@ def pushover() -> tuple[str, str]:
 
 def configured() -> bool:
     return all(pushover())
+
+
+_device = ""
+
+
+def device() -> str:
+    """This Mac's short name, e.g. "n8server". Every push title starts with
+    it in brackets, because two Macs send through the same Pushover app and
+    "Approve on Mac" did not say which Mac (asked for 2026-10-09)."""
+    global _device
+    if not _device:
+        try:
+            _device = subprocess.run(["/usr/sbin/scutil", "--get", "LocalHostName"],
+                                     capture_output=True, text=True,
+                                     timeout=3).stdout.strip()
+        except Exception:
+            pass
+        _device = _device or os.uname().nodename.split(".")[0]
+    return _device
+
+
+def tag(title: str) -> str:
+    return f"[{device()}] {title}"

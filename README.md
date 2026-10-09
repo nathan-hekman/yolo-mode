@@ -148,11 +148,12 @@ script on the machine click any dialog.
 
 Retrying is not the same as working. With 1Password locked, macOS puts its
 Touch ID / password sheet in front of the Authorize prompt and every Return
-misses. So each dialog gets a try count, reset when it closes:
+misses. So each dialog gets a try count, reset when it closes or when an
+approval is verified (the window went away):
 
 - Tries 4 and 7: YOLO Mode looks instead of pressing blind. A password sheet
   already in front goes to the password path above. Otherwise it screenshots
-  the main display and asks Claude (Haiku, through the local `claude` CLI) for
+  the display that holds the dialog and asks Claude (Haiku, through the local `claude` CLI) for
   one step: click a button, enter the password, press Return, or nothing. A
   click only happens on an approve-type label (never Cancel / Deny / Lock) and
   only on a 1Password or macOS-auth window. Screen text is treated as untrusted.
@@ -161,6 +162,15 @@ misses. So each dialog gets a try count, reset when it closes:
 
 The look needs the `claude` CLI signed in (`claude` then `/login`); if it is
 not, the look is skipped and the give-up alert still fires.
+
+Since 2026-10-09 the Authorize prompt is answered by a mouse click at a fixed
+spot from the dialog's bottom-right corner (`corner_click` in `config.json`).
+Return stopped working on it: the keystroke landed, `op` stayed blocked, and
+the watcher counted a success. The click is fenced: the window must be one of
+the dialog's two sizes, nothing may cover the click point, and a real `op`
+command (not the `op daemon` helper) must be waiting.
+
+Every Pushover title starts with the Mac's name, e.g. `[n8server]`.
 
 ## Cloudflare Turnstile
 
