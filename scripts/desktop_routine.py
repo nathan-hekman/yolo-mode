@@ -124,12 +124,29 @@ def choose(app, popup_pred, item_name):
     return True
 
 
-def registry_has(task_id):
+def registry_has(task_id, fire_at=None, cron=None):
+    """True when the registry holds task_id, enabled, on the requested schedule.
+    Presence alone is not enough: a one-off that already fired stays in the file
+    disabled with its old fireAt, so a re-registration under the same id used to
+    report success at once while Desktop had not written anything yet
+    (sw-notification-vacation, 2026-10-09)."""
     paths = glob.glob(f"{HOME}/Library/Application Support/Claude/claude-code-sessions/*/*/scheduled-tasks.json")
     if not paths:
         return False
     data = json.load(open(max(paths, key=os.path.getmtime)))
-    return any(t.get("id") == task_id for t in data.get("scheduledTasks", []))
+    want_ms = None
+    if fire_at:
+        import datetime
+        want_ms = int(datetime.datetime.fromisoformat(fire_at).timestamp() * 1000)
+    for t in data.get("scheduledTasks", []):
+        if t.get("id") != task_id or not t.get("enabled", False):
+            continue
+        if want_ms is not None and abs(int(t.get("fireAt") or 0) - want_ms) > 60_000:
+            continue
+        if cron and t.get("cronExpression") != cron:
+            continue
+        return True
+    return False
 
 
 def skill_body(path):
@@ -202,7 +219,7 @@ def main():
 
     end = time.time() + 180
     while time.time() < end:
-        if registry_has(a.id):
+        if registry_has(a.id, a.fire_at, a.cron):
             print(f"{a.id}: registered by Desktop")
             sys.exit(0)
         allow = find(app, lambda r, t, d: r == "AXButton" and (t + d).startswith("Allow once"))
