@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1065,6 +1066,90 @@ def count_try(key: str, owner: str, label: str) -> bool:
     return key not in _looking
 
 
+# macOS crash-report boxes ("Python quit unexpectedly." with Reopen / Ignore /
+# Report...) are UserNotificationCenter windows too. No Allow button, so the
+# permission rule pressed nothing, retried ten times and paged "STUCK ... 1Password
+# may be locked" -- wrong on both counts (2026-10-15, a Python one-shot that
+# segfaulted on exit). The process is already dead when the box appears, so
+# Ignore loses nothing; what matters is finding out what crashed, which is
+# er-doctor's job. The push is worded so er_classify queues it as a failure.
+CRASH_OWNERS = ("UserNotificationCenter",)
+CRASH_BUTTONS = {"Reopen", "Ignore"}
+CRASH_TEXT_RE = re.compile(r"(\S.*?) quit unexpectedly", re.IGNORECASE)
+CRASH_REPORT_DIR = Path.home() / "Library/Logs/DiagnosticReports"
+_crash_handled: dict[str, float] = {}
+
+
+def _latest_crash_report(app: str) -> str:
+    """Newest .ips for this app written in the last 15 minutes, or ""."""
+    try:
+        cutoff = time.time() - 900
+        hits = [f for f in CRASH_REPORT_DIR.glob(f"{app}*.ips") if f.stat().st_mtime > cutoff]
+        return str(max(hits, key=lambda f: f.stat().st_mtime)) if hits else ""
+    except Exception:
+        return ""
+
+
+def notify_crash(app: str, says: str, report: str) -> bool:
+    try:
+        import requests
+
+        user_key, api_token = secrets.pushover()
+        if not (user_key and api_token):
+            log("no Pushover credentials; see README")
+            return False
+        requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "user": user_key,
+                "token": api_token,
+                "title": secrets.tag(f"Crash on Mac: {app} crashed"),
+                "message": "\n".join(l for l in [
+                    says,
+                    f"Crash report: {report}" if report else "Crash report: none found",
+                    "YOLO Mode pressed Ignore. er-doctor: find what crashed and whether a service died.",
+                ] if l),
+                "priority": 0,
+            },
+            timeout=12,
+        )
+        return True
+    except Exception as e:
+        log(f"pushover failed: {e}")
+        return False
+
+
+def handle_crash_dialog(info: dict) -> bool:
+    """Ignore a crash-report box and hand it to er-doctor. True if it was one."""
+    owner = info.get("kCGWindowOwnerName") or ""
+    pid = info.get("kCGWindowOwnerPID") or 0
+    bounds = info.get("kCGWindowBounds") or {}
+    key = f"{owner}|{pid}|{bounds.get('X')}|{bounds.get('Y')}"
+    now = time.time()
+    if now - _crash_handled.get(key, 0) < 60:
+        return False
+    _crash_handled[key] = now  # one AX walk per window per minute, crash or not
+    saw: list[str] = []
+    find_allow_button(pid, ("Ignore",), seen_out=saw)
+    if not CRASH_BUTTONS <= set(saw):
+        return False
+    says = dialog_text(owner)
+    m = CRASH_TEXT_RE.search(says)
+    if not m:
+        return False
+    app = m.group(1).strip()
+    if AUTO_OFF_FLAG.exists():
+        log(f"crash box for {app}: auto switched off, leaving it")
+        return True
+    clicked = auto_approve(owner, pid, buttons=("Ignore",))
+    report = _latest_crash_report(app)
+    log(f"crash box for {app}: clicked {clicked!r}, report {report or 'none'}")
+    eventlog.record("error", f"{app} crashed", source="watcher", project=owner,
+                    detail=f"Pressed {clicked or 'nothing'}; {report or 'no report'}",
+                    pushed=notify_crash(app, says, report))
+    return True
+
+
 def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> None:
     infos = CGWindowListCopyWindowInfo(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -1094,6 +1179,8 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
         bounds = info.get("kCGWindowBounds") or {}
         w, h = bounds.get("Width", 0), bounds.get("Height", 0)
         _enable_manual_accessibility(owner, info.get("kCGWindowOwnerPID") or 0)
+        if owner in CRASH_OWNERS and handle_crash_dialog(info):
+            continue
         for rule in rules:
             if not match(rule, owner, title, w, h):
                 continue
