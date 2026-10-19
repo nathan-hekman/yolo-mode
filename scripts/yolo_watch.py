@@ -1016,7 +1016,8 @@ SEEN_TTL = 3600       # seconds to remember a fired rule before forgetting the k
 MAX_SKIP_LOGGED = 500  # keys remembered for once-per-run skip logging
 MAX_PROBES_PER_SCAN = 3  # accessibility probes per pass, so one pass stays quick
 # Owners of the macOS prompts that block a session. Handled first each pass.
-SYSTEM_OWNERS = ("UserNotificationCenter", "SecurityAgent", "CoreServicesUIAgent")
+SYSTEM_OWNERS = ("UserNotificationCenter", "SecurityAgent", "CoreServicesUIAgent",
+                 "coreautha", "System Settings")
 MAX_AX_NODES = 120       # nodes per probe; a permission dialog needs far fewer
 _no_button: dict[str, float] = {}
 _skip_logged: set[str] = set()

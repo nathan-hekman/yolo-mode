@@ -102,7 +102,9 @@ password from 1Password (`op://Bots/Mac login/password`), types it, and presses
 the button macOS already had highlighted — `Add Helper`, `Modify Settings`,
 whatever that prompt happens to call it.
 
-The same goes for System Settings' own unlock sheet (*"Privacy & Security is
+The same goes for LocalAuthentication's prompt (*"1Password is trying to
+unlock. Enter the password for the user …"*), which comes from `coreautha`
+rather than SecurityAgent, and for System Settings' own unlock sheet (*"Privacy & Security is
 trying to unlock system settings"*). That one is not a SecurityAgent window but
 a sheet hanging off System Settings' main window, with no default button, so
 its rule raises System Settings first and presses `Unlock` / `Modify Settings`
