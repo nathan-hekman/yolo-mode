@@ -118,8 +118,12 @@ Guardrails, all of them learned the hard way on 2026-08-04:
   frontmost app is checked again before a key is sent.
 - Nothing is submitted until the field is confirmed to hold exactly as many
   characters as were sent. A short read gets backspaced out rather than tried.
-- Two attempts per dialog per run. A wrong password leaves the same dialog on
-  screen, and an uncapped retry loop locks the account out.
+- Two attempts per dialog, reset when that dialog closes, and at most five
+  submits in any ten minutes across all prompts. A wrong password leaves the
+  same dialog on screen, and an uncapped retry loop locks the account out.
+- Each Mac reads its own login item: `auth_fill.op_item_by_host` in
+  `config.json`, keyed on `scutil --get LocalHostName` (n8bot reads
+  `op://Bots/n8bot mac login/password`), falling back to `op_item`.
 - The password is read from 1Password per prompt, never cached, never logged,
   never written to disk. See `scripts/mac_password.py`.
 - Off switch: `touch ~/.yolo_mode_no_password` (this alone), or either of the

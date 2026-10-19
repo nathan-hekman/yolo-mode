@@ -490,9 +490,16 @@ def click_corner_button(owner: str, info: dict, offset: tuple, sizes: list) -> s
 
 
 AUTH_OFF_FLAG = Path.home() / ".yolo_mode_no_password"
-AUTH_MAX_ATTEMPTS = 2   # per dialog identity, per run
+AUTH_MAX_ATTEMPTS = 2   # per dialog, reset when that dialog closes
 _auth_attempts: dict[str, int] = {}
 _auth_busy: set[str] = set()
+# A second, rolling cap across every prompt. The per-dialog count resets when a
+# dialog closes, so an app that closes and re-raises its prompt after each wrong
+# password would otherwise get two fresh tries every time -- the uncapped loop
+# that locks the account. macOS starts delaying logins well after 5 failures.
+AUTH_WINDOW_SECS = 600
+AUTH_WINDOW_MAX = 5
+_auth_submits: list[float] = []
 
 
 def _find_secure_field(pid: int, ax_timeout: float = AX_TIMEOUT):
@@ -588,6 +595,18 @@ def auth_fill(owner: str, pid: int, key: str,
         _warn_missing_permission()
         return None
     if _auth_attempts.get(key, 0) >= AUTH_MAX_ATTEMPTS:
+        # Logged, because this return used to be silent: the counter was keyed
+        # on "SecurityAgent|<title>", every prompt shares that title, and it
+        # never reset, so after two fills in one run every later prompt was
+        # skipped with nothing in the log (2026-10-19, AI Nathan Camera).
+        log(f"auth-fill: {AUTH_MAX_ATTEMPTS} tries already spent on this "
+            f"{owner} dialog; left for a human")
+        return None
+    now = time.time()
+    _auth_submits[:] = [t for t in _auth_submits if now - t < AUTH_WINDOW_SECS]
+    if len(_auth_submits) >= AUTH_WINDOW_MAX:
+        log(f"auth-fill: {len(_auth_submits)} passwords submitted in the last "
+            f"{AUTH_WINDOW_SECS // 60} min; holding off ({owner})")
         return None
     found = _find_secure_field(pid, ax_timeout)
     if found is None:
@@ -644,6 +663,19 @@ def auth_fill(owner: str, pid: int, key: str,
             log(f"auth-fill: aborted, password field never took focus ({owner})")
             return None
 
+        # Start from an empty field. A prompt that reappears after a cancelled
+        # or failed try can keep its old text, and typing on top of it is how
+        # the field once held 13 characters for an 8-character password
+        # (2026-10-18). The length check below would catch it, but only after
+        # spending the attempt.
+        leftover = len(_ax_value(field, kAXValueAttribute) or "")
+        if leftover:
+            _clear_field(leftover + 4)
+            time.sleep(0.2)
+            if _ax_value(field, kAXValueAttribute):
+                log(f"auth-fill: aborted, could not clear the field ({owner})")
+                return None
+
         macinput.type_text(password)
         time.sleep(0.3)
 
@@ -661,6 +693,7 @@ def auth_fill(owner: str, pid: int, key: str,
         if AXUIElementPerformAction(default_button, kAXPressAction) != 0:
             log(f"auth-fill: press failed on {button_title!r} ({owner})")
             return None
+        _auth_submits.append(time.time())
         return button_title, says
     except Exception as e:
         log(f"auth-fill error ({owner}): {e}")
@@ -1402,6 +1435,11 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
     for key in list(_tries):
         if key not in live:
             del _tries[key]
+    # Same for password prompts. Not when a fill is still in flight: its
+    # dialog can vanish for a scan while SecurityAgent redraws it.
+    for key in list(_auth_attempts):
+        if key not in live and key not in _auth_busy:
+            del _auth_attempts[key]
 
     # streak is keyed on window title, and a title can carry a filename or a
     # command line, so the key space is effectively unbounded over a long run.

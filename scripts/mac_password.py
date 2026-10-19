@@ -62,10 +62,18 @@ class PasswordUnavailable(RuntimeError):
 
 
 def _op_reference() -> str:
-    """Secret reference from config.json, or the default Bots item."""
+    """Secret reference from config.json, or the default Bots item.
+
+    `op_item_by_host` (keyed on LocalHostName) wins over `op_item`, so each Mac
+    reads its own login item: n8bot has "n8bot mac login" in Bots, and one
+    shared config.json in git serves both machines.
+    """
     try:
         config = json.loads((Path(__file__).resolve().parent.parent / "config.json").read_text())
-        return config.get("auth_fill", {}).get("op_item") or DEFAULT_REF
+        auth = config.get("auth_fill", {})
+        import secrets_store  # noqa: PLC0415
+        return (auth.get("op_item_by_host", {}).get(secrets_store.device())
+                or auth.get("op_item") or DEFAULT_REF)
     except Exception:
         return DEFAULT_REF
 
@@ -125,7 +133,7 @@ if __name__ == "__main__":
     # Self-test. Asserts a length, never prints the value -- a test that echoes
     # the secret puts it in the terminal scrollback and the shell history.
     try:
-        print(f"source: {source()}")
+        print(f"source: {source()} -> {_op_reference()}")
         print(f"read ok: {len(login_password())} characters")
     except PasswordUnavailable as exc:
         raise SystemExit(f"password unavailable: {exc}")
