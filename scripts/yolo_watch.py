@@ -510,17 +510,43 @@ def _find_secure_field(pid: int, ax_timeout: float = AX_TIMEOUT):
     arrives prefilled, and the password -- and "the second one" is a rule that
     holds until the first prompt that omits the username row and silently types
     the password into a field that is about to be shown on screen.
+
+    The returned "window" is whatever holds the field: the window itself for
+    SecurityAgent, or an AXSheet hanging off it. System Settings asks for the
+    password to unlock Privacy & Security in a sheet attached to its main
+    window, not in a window of its own, so a window-children-only scan never
+    found it and the prompt sat there unanswered (2026-10-19).
     """
+    def secure_child(container):
+        for child in _ax_value(container, kAXChildrenAttribute) or []:
+            if (_ax_value(child, kAXRoleAttribute) == "AXTextField"
+                    and _ax_value(child, kAXSubroleAttribute) == "AXSecureTextField"):
+                return child
+        return None
+
     try:
         app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, ax_timeout)
         for window in _ax_value(app, kAXWindowsAttribute) or []:
+            field = secure_child(window)
+            if field is not None:
+                return window, field
             for child in _ax_value(window, kAXChildrenAttribute) or []:
-                if (_ax_value(child, kAXRoleAttribute) == "AXTextField"
-                        and _ax_value(child, kAXSubroleAttribute) == "AXSecureTextField"):
-                    return window, child
+                if _ax_value(child, kAXRoleAttribute) == "AXSheet":
+                    field = secure_child(child)
+                    if field is not None:
+                        return child, field
     except Exception as e:
         log(f"auth-fill: field scan error (pid {pid}): {e}")
+    return None
+
+
+def _named_button(container, titles: tuple):
+    """The direct-child button of container whose title is exactly one of titles."""
+    for child in _ax_value(container, kAXChildrenAttribute) or []:
+        if (_ax_value(child, kAXRoleAttribute) == "AXButton"
+                and _ax_value(child, kAXTitleAttribute) in titles):
+            return child
     return None
 
 
@@ -558,7 +584,8 @@ def _window_static_text(window) -> str:
 
 
 def auth_fill(owner: str, pid: int, key: str,
-              ax_timeout: float = AX_TIMEOUT) -> tuple[str, str] | None:
+              ax_timeout: float = AX_TIMEOUT,
+              submit_buttons: tuple = ()) -> tuple[str, str] | None:
     """Type the Mac login password into a macOS auth prompt and submit it.
 
     This is the one rule in the app that hands out privilege rather than
@@ -615,7 +642,12 @@ def auth_fill(owner: str, pid: int, key: str,
     window, field = found
     says = _window_static_text(window)
 
-    default_button = _ax_value(window, "AXDefaultButton")
+    # A System Settings sheet's AXDefaultButton is an untitled element that
+    # refuses AXPress ("press failed on '(default)'", 2026-10-19), so a rule
+    # for it names the submit button instead ("Unlock"). Exact title only, and
+    # only on the sheet that holds the password field.
+    default_button = (_named_button(window, submit_buttons) if submit_buttons
+                      else _ax_value(window, "AXDefaultButton"))
     if default_button is None:
         log(f"auth-fill: {owner} dialog has no default button; left for a human")
         return None
@@ -649,6 +681,12 @@ def auth_fill(owner: str, pid: int, key: str,
         # front -- observed 2026-08-04, when it went to 1Password's window.
         # A mouse click on the field does both jobs at once and is what a
         # person would do.
+        # A sheet inside an ordinary app (System Settings) can sit behind
+        # another window, and then the click lands on that window instead --
+        # "aborted, 'Claude' is frontmost" twice in a row (2026-10-19). Unlike
+        # SecurityAgent, a regular app can be raised first, so raise it.
+        if submit_buttons and owner.lower() not in (macinput.frontmost_app() or "").lower():
+            _activate_app(owner)
         macinput.mouse_click(*center)
         time.sleep(0.5)
 
@@ -690,9 +728,35 @@ def auth_fill(owner: str, pid: int, key: str,
             _clear_field(len(password) + 4)
             return None
 
-        if AXUIElementPerformAction(default_button, kAXPressAction) != 0:
-            log(f"auth-fill: press failed on {button_title!r} ({owner})")
-            return None
+        err = AXUIElementPerformAction(default_button, kAXPressAction)
+        for _ in range(3 if submit_buttons and err != 0 else 0):
+            # The System Settings sheet redraws itself once the field fills, so
+            # the button looked up before typing comes back -25202 (invalid
+            # element) when pressed (2026-10-19). Look it up again each try.
+            time.sleep(0.5)
+            again = _find_secure_field(pid, ax_timeout)
+            if again is None:
+                err = 0  # the sheet went away: the first press did land
+                break
+            fresh = _named_button(again[0], submit_buttons)
+            if fresh is None:
+                continue
+            default_button = fresh
+            err = AXUIElementPerformAction(default_button, kAXPressAction)
+            if err == 0:
+                break
+        if err != 0:
+            log(f"auth-fill: AXPress on {button_title!r} returned {err} ({owner})")
+            # A real click on it, with this process still frontmost, is what a
+            # person would do anyway.
+            center = _element_center(default_button) if submit_buttons else None
+            front = macinput.frontmost_app() or ""
+            if center is None or owner.lower() not in front.lower():
+                log(f"auth-fill: press failed on {button_title!r} ({owner})")
+                return None
+            time.sleep(0.4)
+            macinput.mouse_click(*center)
+            log(f"auth-fill: AXPress refused {button_title!r}; clicked it ({owner})")
         _auth_submits.append(time.time())
         return button_title, says
     except Exception as e:
@@ -736,7 +800,8 @@ def notify_auth_filled(owner: str, what: str, button: str) -> bool:
 
 
 def start_auth_fill(owner: str, pid: int, key: str, label: str,
-                    ax_timeout: float = AX_TIMEOUT) -> None:
+                    ax_timeout: float = AX_TIMEOUT,
+                    submit_buttons: tuple = ()) -> None:
     """Run auth_fill on its own thread and report the result.
 
     Off the poll thread on purpose: a 1Password read can take tens of seconds
@@ -753,7 +818,7 @@ def start_auth_fill(owner: str, pid: int, key: str, label: str,
 
     def run() -> None:
         try:
-            result = auth_fill(owner, pid, key, ax_timeout)
+            result = auth_fill(owner, pid, key, ax_timeout, submit_buttons)
             if not result:
                 # Declined, out of attempts, or 1Password unreachable. The
                 # prompt is still sitting there, so fall back to the ordinary
@@ -1300,7 +1365,8 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     )
                 else:
                     start_auth_fill(owner, pid, key, rule["label"],
-                                    rule.get("ax_timeout", AX_TIMEOUT))
+                                    rule.get("ax_timeout", AX_TIMEOUT),
+                                    tuple(rule.get("submit_buttons") or ()))
                     break
 
             says = dialog_text(owner) if not title else ""
@@ -1352,9 +1418,21 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                     )
                     break
 
+            # text_any narrows a rule to dialogs that say one of these phrases.
+            # The Gatekeeper rule uses it to open only apps Apple has already
+            # scanned ("Apple checked it for malicious software and none was
+            # detected"); the "can't be opened" / unverified-developer kind
+            # never says that, so it still falls through to the alert below.
+            text_ok = True
+            if rule.get("text_any"):
+                said = (says or title or "").lower()
+                text_ok = any(t.lower() in said for t in rule["text_any"])
+                if not text_ok:
+                    log(f"{rule['label']}: text did not match, alerting instead")
+
             # Read the dialog before clicking, so the after-the-fact alert can
             # say what was granted and to whom.
-            if rule.get("auto_approve") and not AUTO_OFF_FLAG.exists():
+            if rule.get("auto_approve") and text_ok and not AUTO_OFF_FLAG.exists():
                 clicked = auto_approve(
                     owner,
                     info.get("kCGWindowOwnerPID") or 0,

@@ -17,7 +17,8 @@ your phone with the session's name and a link straight back into it.
 Three parts:
 
 - **Auto-approval** — macOS permission dialogs get clicked, by an allowlist of
-  button titles, with Gatekeeper and 1Password held out. Cloudflare Turnstile
+  button titles, with 1Password held out and Gatekeeper limited to
+  Apple-notarized apps. Cloudflare Turnstile
   checkboxes get solved. Password prompts get answered from 1Password.
 - **Audit log** — every click is recorded before you hear about it: what was
   granted, to which app, at what second, and whether the phone alert went out.
@@ -80,12 +81,16 @@ Guardrails:
   catch-all narrows that to Allow / Always Allow / Allow While Using App —
   "OK" means "grant" on a named permission dialog, but on an unknown app's
   dialog it could be confirming a deletion.
-- Two kinds are never auto-approved: **Gatekeeper** (its Allow-shaped button
-  runs a program that was just downloaded, which is how a drive-by download
-  becomes a running program) and **1Password** generally — with one carve-out,
-  the "Allow … to get CLI access" dialog, which is auto-Authorized by a rule
-  that will click nothing but a button titled exactly `Authorize`, so Unlock and
-  every other 1Password prompt is untouched.
+- **Gatekeeper** is clicked only one way: `Open`, and only when the dialog
+  says *"Apple checked it for malicious software and none was detected"* —
+  the first-launch prompt for a notarized download (a Homebrew cask, say). The
+  "can't be opened" / unverified-developer kind never says that, so it still
+  only alerts: its Allow-shaped button is how a drive-by download becomes a
+  running program.
+- **1Password** is never auto-approved, with one carve-out: the "Allow … to
+  get CLI access" dialog, which is auto-Authorized by a rule that will click
+  nothing but a button titled exactly `Authorize`, so Unlock and every other
+  1Password prompt is untouched.
 - Every auto-approval is logged and pushed after the fact.
 - Off switch: the menubar toggle, or `touch ~/.yolo_mode_no_autoapprove`.
 
@@ -96,6 +101,12 @@ password to allow this."* is filled in for you: YOLO Mode reads the Mac login
 password from 1Password (`op://Bots/Mac login/password`), types it, and presses
 the button macOS already had highlighted — `Add Helper`, `Modify Settings`,
 whatever that prompt happens to call it.
+
+The same goes for System Settings' own unlock sheet (*"Privacy & Security is
+trying to unlock system settings"*). That one is not a SecurityAgent window but
+a sheet hanging off System Settings' main window, with no default button, so
+its rule raises System Settings first and presses `Unlock` / `Modify Settings`
+by name, looking the button up again if the sheet redraws.
 
 **This is the one feature here that hands out privilege rather than granting a
 capability.** Everything else clicks Allow on a request for a camera or a
