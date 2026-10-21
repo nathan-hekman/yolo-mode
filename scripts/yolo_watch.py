@@ -766,6 +766,20 @@ def auth_fill(owner: str, pid: int, key: str,
         del password
 
 
+def _with_link(message: str) -> str:
+    """`message` with a discuss link via ~/bin/push-link; plain on failure."""
+    try:
+        out = subprocess.run(
+            [os.path.expanduser("~/bin/push-link"), "yolo-mode", message],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout:
+            return out.stdout
+    except Exception:
+        pass
+    return message
+
+
 def notify_auth_filled(owner: str, what: str, button: str) -> bool:
     """Say, loudly and immediately, that a password was just typed for you."""
     try:
@@ -782,7 +796,7 @@ def notify_auth_filled(owner: str, what: str, button: str) -> bool:
                 "user": user_key,
                 "token": api_token,
                 "title": secrets.tag(f"Password entered: {owner}"),
-                "message": (
+                "message": _with_link(
                     f"{what}\nSubmitted: {button}\n"
                     "Not you? touch ~/.yolo_mode_no_password"
                 ),
@@ -933,7 +947,7 @@ def notify(label: str, owner: str, title: str, says: str, priority: int = 0) -> 
                 "user": user_key,
                 "token": api_token,
                 "title": secrets.tag(f"Approve on Mac: {label}"),
-                "message": "\n".join([l for l in [headline] + body_lines if l]),
+                "message": _with_link("\n".join([l for l in [headline] + body_lines if l])),
                 "priority": priority,
             },
             timeout=12,

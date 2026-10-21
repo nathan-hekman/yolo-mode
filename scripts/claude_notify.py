@@ -166,6 +166,22 @@ def describe(tool: dict) -> tuple[str, str]:
 # push
 # --------------------------------------------------------------------------
 
+def _with_link(message: str) -> str:
+    """`message` with a discuss link via ~/bin/push-link; plain on failure."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            [os.path.expanduser("~/bin/push-link"), "yolo-mode", message],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout:
+            return out.stdout
+    except Exception:
+        pass
+    return message
+
+
 def push(title: str, message: str, session_id: str = "") -> bool:
     try:
         import requests
@@ -179,7 +195,7 @@ def push(title: str, message: str, session_id: str = "") -> bool:
             "user": user_key,
             "token": api_token,
             "title": secrets.tag(title),
-            "message": message,
+            "message": _with_link(message),
             "priority": 0,
         }
         if session_id:
