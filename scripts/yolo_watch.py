@@ -368,6 +368,70 @@ def _waiting_args_blocked(rule: dict) -> str | None:
     return None
 
 
+OP_CALLERS_LOG = Path.home() / "Library/Logs/yolo-mode-op-callers.jsonl"
+_op_pids_logged: set[int] = set()
+
+
+def _redact_args(args: list[str]) -> str:
+    """One op command line, safe to write down.
+
+    `op item create/edit` takes field assignments (password=...), so every
+    word holding "=" after the subcommand keeps only its name.
+    """
+    out = []
+    for i, a in enumerate(args):
+        if i > 1 and "=" in a and not a.startswith(("--vault", "--format",
+                                                    "--fields", "--categories")):
+            a = a.split("=", 1)[0] + "=<redacted>"
+        out.append(a)
+    return " ".join(out)[:300]
+
+
+def _record_op_callers(rule: dict, guarded: str | None) -> None:
+    """Write down which command each CLI-access prompt was raised for.
+
+    The watcher approves 1Password's Authorize prompt without recording who
+    asked, so 700-odd approvals across both Macs had no known source. Nathan
+    chose on 2026-10-24 to log them for a few days before turning automatic
+    approval off. Each waiting `op` process is written once, with up to five
+    parent processes so the script or session behind it can be named.
+    Report: scripts/op_callers_report.py.
+    """
+    name = rule.get("require_process")
+    if not name:
+        return
+    try:
+        out = subprocess.run(["/bin/ps", "-Ao", "pid=,ppid=,args="],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return
+    procs = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2])
+    for pid, (ppid, args) in procs.items():
+        argv = args.split()
+        if (pid in _op_pids_logged or not argv or Path(argv[0]).name != name
+                or argv[1:2] == ["daemon"]):
+            continue
+        _op_pids_logged.add(pid)
+        chain, cur = [], ppid
+        while cur > 1 and cur in procs and len(chain) < 5:
+            chain.append(procs[cur][1][:160])
+            cur = procs[cur][0]
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "pid": pid,
+               "op": _redact_args(argv), "parents": chain,
+               "held_back": guarded}
+        try:
+            with OP_CALLERS_LOG.open("a") as f:
+                f.write(json.dumps(rec) + "\n")
+        except Exception as exc:
+            log(f"op-callers: could not write {OP_CALLERS_LOG}: {exc}")
+    if len(_op_pids_logged) > 5000:
+        _op_pids_logged.clear()
+
+
 def _frontmost_app() -> str:
     try:
         result = subprocess.run(
@@ -1418,6 +1482,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
             says = dialog_text(owner) if not title else ""
 
             guarded = _waiting_args_blocked(rule)
+            _record_op_callers(rule, guarded)
             if guarded:
                 log(f"{rule['label']}: waiting {rule.get('require_process')} "
                     f"names '{guarded}'; leaving the dialog for Nathan")
