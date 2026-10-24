@@ -99,7 +99,11 @@
       "cooldown": 0,
       "label": "1Password CLI-access authorize",
       "activate_if_needed": true,
-      "silent": true
+      "silent": true,
+      "never_if_args": [
+        "fidelity",
+        "usaa"
+      ]
     },
     {
       "owner": "1Password",
@@ -168,5 +172,6 @@
       "Google Chrome Canary",
       "Chromium"
     ]
-  }
+  },
+  "_never_if_args": "never_if_args on the 1Password CLI-access rule keeps the Authorize prompt manual (alert only) while any waiting `op` command's arguments mention Fidelity or USAA, case-insensitive. Nathan asked 2026-10-24. Limits: it sees only the command line, so an item fetched by UUID or through `op inject` with a template file is not caught, and a session already authorized by an earlier prompt raises no new dialog to hold back."
 }

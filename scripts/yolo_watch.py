@@ -337,6 +337,37 @@ def _default_key_allowed(rule: dict, owner: str) -> bool:
     return True
 
 
+def _waiting_args_blocked(rule: dict) -> str | None:
+    """The word that keeps this dialog manual, or None.
+
+    never_if_args lists words that, found in the arguments of a waiting
+    require_process command, turn auto-approve off for its dialog: it falls
+    through to the ordinary alert and waits for Nathan. Matched
+    case-insensitively against every live process of that name, so one
+    guarded `op` call in flight holds back every Authorize prompt until it
+    clears. Nathan asked on 2026-10-24 that `op` reads naming Fidelity or
+    USAA never be authorized for him.
+    """
+    words = [w.lower() for w in rule.get("never_if_args") or ()]
+    name = rule.get("require_process")
+    if not words or not name:
+        return None
+    try:
+        out = subprocess.run(["/bin/ps", "-Ao", "args="],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        # Can't see what is waiting, so can't prove it is not guarded.
+        return "(ps failed)"
+    for line in out.splitlines():
+        args = line.split()
+        if args and Path(args[0]).name == name:
+            low = line.lower()
+            for w in words:
+                if w in low:
+                    return w
+    return None
+
+
 def _frontmost_app() -> str:
     try:
         result = subprocess.run(
@@ -1386,7 +1417,13 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
 
             says = dialog_text(owner) if not title else ""
 
-            if (rule.get("corner_click") and not AUTO_OFF_FLAG.exists()
+            guarded = _waiting_args_blocked(rule)
+            if guarded:
+                log(f"{rule['label']}: waiting {rule.get('require_process')} "
+                    f"names '{guarded}'; leaving the dialog for Nathan")
+            auto_off = AUTO_OFF_FLAG.exists() or bool(guarded)
+
+            if (rule.get("corner_click") and not auto_off
                     and _default_key_allowed(rule, owner)):
                 clicked = click_corner_button(
                     owner, info, tuple(rule["corner_click"]),
@@ -1407,7 +1444,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
             # single keystroke answers it in milliseconds -- against a
             # twelve-level accessibility walk of a web view, which costs
             # seconds and is the slowest probe the watcher runs.
-            if (rule.get("default_key") == "first" and not AUTO_OFF_FLAG.exists()
+            if (rule.get("default_key") == "first" and not auto_off
                     and _default_key_allowed(rule, owner)):
                 clicked = press_default_key(
                     owner, pid,
@@ -1447,7 +1484,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
 
             # Read the dialog before clicking, so the after-the-fact alert can
             # say what was granted and to whom.
-            if rule.get("auto_approve") and text_ok and not AUTO_OFF_FLAG.exists():
+            if rule.get("auto_approve") and text_ok and not auto_off:
                 clicked = auto_approve(
                     owner,
                     info.get("kCGWindowOwnerPID") or 0,
