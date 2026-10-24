@@ -1203,6 +1203,28 @@ def _try_password(key: str, label: str) -> bool:
     return False
 
 
+def _look_may_act_on(look_owner: str, target: str) -> bool:
+    """May a screen-look started for look_owner's dialog act on target's window?
+
+    Acting across owners is the point of the look (a Touch ID sheet in front of
+    1Password's prompt), except on 1Password itself: its Authorize prompt opens
+    every vault, so only a look begun for a 1Password rule may answer it, and
+    only while no 1Password rule is held (manual_flag, never_if_args). Checked
+    at the moment of acting, since a hold can start mid-look. Before
+    2026-10-24 a look begun for any stuck dialog could press Return or click
+    Authorize on a held 1Password prompt.
+    """
+    if target.lower() != "1password":
+        return True
+    if look_owner.lower() != "1password":
+        return False
+    for r in load_rules():
+        if (r.get("owner") or "").lower() == "1password" and (
+                _manual_flag_set(r) or _waiting_args_blocked(r)):
+            return False
+    return True
+
+
 def look_and_act(owner: str, key: str, label: str, tries: int) -> None:
     """Off-thread: screenshot, ask Claude for one step, take it if in bounds."""
     import threading  # noqa: PLC0415
@@ -1229,7 +1251,11 @@ def look_and_act(owner: str, key: str, label: str, tries: int) -> None:
                         log("look: said password, but no trusted password field is in front")
                     return
                 if a["action"] == "return":
-                    if _front_trusted():
+                    front = _front_trusted()
+                    if front and not _look_may_act_on(owner, front[0]):
+                        log(f"look: refused Return on {front[0]} (look began for "
+                            f"{owner}, or a 1Password hold is on)")
+                    elif front:
                         for down in (True, False):
                             CGEventPost(kCGHIDEventTap,
                                         macinput.CGEventCreateKeyboardEvent(None, 36, down))
@@ -1247,6 +1273,10 @@ def look_and_act(owner: str, key: str, label: str, tries: int) -> None:
                     if not hit:
                         log(f"look: refused click at ({a['x']:.0f},{a['y']:.0f}); "
                             "not on a 1Password / macOS auth window")
+                        return
+                    if not _look_may_act_on(owner, hit):
+                        log(f"look: refused click on {hit} (look began for "
+                            f"{owner}, or a 1Password hold is on)")
                         return
                     macinput.mouse_click(a["x"], a["y"])
                     log(f"look: clicked {a['button']!r} on {hit}")
@@ -1417,11 +1447,15 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
             # Per-rule cooldown: the self-test sets 0, because a test you
             # cannot repeat for five minutes is a test you stop running.
             cooldown = rule.get("cooldown", COOLDOWN_SECS)
+            seen_key = key
             if _manual_flag_set(rule):
                 # Nothing will be clicked, so re-handling it every poll would
-                # only repeat the alert and the event-log line.
+                # only repeat the alert and the event-log line. Its own key, so
+                # a click from before the flag was set cannot swallow the first
+                # held alert.
                 cooldown = max(cooldown, COOLDOWN_SECS)
-            if now - seen.get(key, 0) <= cooldown:
+                seen_key = f"{key}|held"
+            if now - seen.get(seen_key, 0) <= cooldown:
                 break
             # A catch-all rule matches on window shape, which describes most
             # windows on the Mac, so confirm this one really offers an Allow
@@ -1464,7 +1498,7 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                             f"no allowed button, saw {named}")
                     break
 
-            seen[key] = now
+            seen[seen_key] = now
 
             # Hold-backs come before the try counter. count_try's screen-look
             # retries (look_and_act) can press Return or click Authorize on a

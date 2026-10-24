@@ -12,6 +12,8 @@
 # UUID, in an op:// reference or a --vault flag, and `op vault get Bots` counts
 # as a read (2026-10-24). A desktop-app authorization opens every vault in the
 # account, so each read routed here is one fewer account-wide session.
+# `op inject` with a template file or stdin names no vault on the command line,
+# so it still goes to the desktop app.
 #
 # Installed as ~/.local/bin/op (ahead of /opt/homebrew/bin on PATH) by
 # install_yolo_mode.sh. Kill switch: OP_WRAPPER_OFF=1.
@@ -41,10 +43,23 @@ for a in "$@"; do
   fi
   prev="$a"
 done
-case "$1 $2" in
+# The command words are the first positional arguments, wherever options sit:
+# `op --format=json item get X --vault Bots` is still `item get`. Options that
+# take a separate value (--account NAME, --vault Bots) skip that value too.
+pos=()
+want_val=0
+for a in "$@"; do
+  if [ "$want_val" = 1 ]; then want_val=0; continue; fi
+  case "$a" in
+    --account|--config|--encoding|--format|--session|--vault|--fields|--categories|--tags|--out-file|-o|--file-mode) want_val=1 ;;
+    -*) ;;
+    *) pos+=("$a") ;;
+  esac
+done
+case "${pos[0]} ${pos[1]}" in
   "read "*|"inject "*|"item get"|"item list") read_only=1 ;;
   "vault get")
-    case "$3" in Bots|$BOTS_ID) bots=1; read_only=1 ;; nathan-ai-clone|$CLONE_ID) clone=1; read_only=1 ;; esac ;;
+    case "${pos[2]}" in Bots|$BOTS_ID) bots=1; read_only=1 ;; nathan-ai-clone|$CLONE_ID) clone=1; read_only=1 ;; esac ;;
 esac
 shopt -u nocasematch
 
