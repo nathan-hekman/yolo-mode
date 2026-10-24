@@ -15,32 +15,44 @@
 #
 # Installed as ~/.local/bin/op (ahead of /opt/homebrew/bin on PATH) by
 # install_yolo_mode.sh. Kill switch: OP_WRAPPER_OFF=1.
+#
+# The AI clone's vault (nathan-ai-clone) gets the same treatment with its own
+# read-only service account, token in ~/.config/nathan-ai-clone/op-token
+# (2026-10-24). Its own token, not the Bots one, so neither can read the
+# other's vault. A call that names both vaults goes to the desktop app.
 REAL=/opt/homebrew/bin/op
 TOKEN_FILE="$HOME/.config/yolo-mode/op-token"
 BOTS_ID=3lbnjdhid2owggk4eh3bzspqrq
+CLONE_TOKEN_FILE="$HOME/.config/nathan-ai-clone/op-token"
 
 bots=0
+clone=0
 read_only=0
 prev=""
 shopt -s nocasematch
 for a in "$@"; do
   case "$a" in
     op://Bots/*|op://$BOTS_ID/*|--vault=Bots|--vault=$BOTS_ID) bots=1 ;;
+    op://nathan-ai-clone/*|--vault=nathan-ai-clone) clone=1 ;;
   esac
   if [ "$prev" = "--vault" ]; then
-    case "$a" in Bots|$BOTS_ID) bots=1 ;; esac
+    case "$a" in Bots|$BOTS_ID) bots=1 ;; nathan-ai-clone) clone=1 ;; esac
   fi
   prev="$a"
 done
 case "$1 $2" in
   "read "*|"inject "*|"item get"|"item list") read_only=1 ;;
   "vault get")
-    case "$3" in Bots|$BOTS_ID) bots=1; read_only=1 ;; esac ;;
+    case "$3" in Bots|$BOTS_ID) bots=1; read_only=1 ;; nathan-ai-clone) clone=1; read_only=1 ;; esac ;;
 esac
 shopt -u nocasematch
 
-if [ -z "$OP_WRAPPER_OFF" ] && [ -z "$OP_SERVICE_ACCOUNT_TOKEN" ] \
-   && [ "$bots" = 1 ] && [ "$read_only" = 1 ] && [ -s "$TOKEN_FILE" ]; then
-  OP_SERVICE_ACCOUNT_TOKEN="$(cat "$TOKEN_FILE")" exec "$REAL" "$@"
+if [ -z "$OP_WRAPPER_OFF" ] && [ -z "$OP_SERVICE_ACCOUNT_TOKEN" ] && [ "$read_only" = 1 ]; then
+  if [ "$bots" = 1 ] && [ "$clone" = 0 ] && [ -s "$TOKEN_FILE" ]; then
+    OP_SERVICE_ACCOUNT_TOKEN="$(cat "$TOKEN_FILE")" exec "$REAL" "$@"
+  fi
+  if [ "$clone" = 1 ] && [ "$bots" = 0 ] && [ -s "$CLONE_TOKEN_FILE" ]; then
+    OP_SERVICE_ACCOUNT_TOKEN="$(cat "$CLONE_TOKEN_FILE")" exec "$REAL" "$@"
+  fi
 fi
 exec "$REAL" "$@"
