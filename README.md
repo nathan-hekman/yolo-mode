@@ -91,6 +91,11 @@ Guardrails:
   get CLI access" dialog, which is auto-Authorized by a rule that will click
   nothing but a button titled exactly `Authorize`, so Unlock and every other
   1Password prompt is untouched.
+- That approval opens every vault in the account for the asking terminal, so
+  it can be switched off per Mac: while `~/.yolo_mode_op_manual` exists, the
+  CLI-access dialog only alerts (no click, no Return, no screen-look retry).
+  n8server has it since 2026-10-24; Bots reads skip the dialog entirely
+  through the op wrapper's service account. Delete the file to go back.
 - Every auto-approval is logged and pushed after the fact.
 - Off switch: the menubar toggle, or `touch ~/.yolo_mode_no_autoapprove`.
 

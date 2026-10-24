@@ -337,6 +337,18 @@ def _default_key_allowed(rule: dict, owner: str) -> bool:
     return True
 
 
+def _manual_flag_set(rule: dict) -> bool:
+    """True while this Mac's manual_flag file for the rule exists.
+
+    The rule's config travels between the Macs through git; the flag file
+    does not, so one Mac can stop auto-approving while the other still needs
+    it (2026-10-24: n8server went manual while n8bot waits on the AI clone's
+    own service account). A dialog held this way only alerts Nathan.
+    """
+    flag = rule.get("manual_flag")
+    return bool(flag) and Path(os.path.expanduser(flag)).exists()
+
+
 def _waiting_args_blocked(rule: dict) -> str | None:
     """The word that keeps this dialog manual, or None.
 
@@ -1404,7 +1416,12 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
                 break
             # Per-rule cooldown: the self-test sets 0, because a test you
             # cannot repeat for five minutes is a test you stop running.
-            if now - seen.get(key, 0) <= rule.get("cooldown", COOLDOWN_SECS):
+            cooldown = rule.get("cooldown", COOLDOWN_SECS)
+            if _manual_flag_set(rule):
+                # Nothing will be clicked, so re-handling it every poll would
+                # only repeat the alert and the event-log line.
+                cooldown = max(cooldown, COOLDOWN_SECS)
+            if now - seen.get(key, 0) <= cooldown:
                 break
             # A catch-all rule matches on window shape, which describes most
             # windows on the Mac, so confirm this one really offers an Allow
@@ -1449,9 +1466,18 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
 
             seen[key] = now
 
+            # Hold-backs come before the try counter. count_try's screen-look
+            # retries (look_and_act) can press Return or click Authorize on a
+            # 1Password window by themselves, so a held dialog must never reach
+            # them. Until 2026-10-24 they ran first, and a dialog held back by
+            # never_if_args (Fidelity, USAA) could be clicked through on its
+            # fourth poll.
+            guarded = _waiting_args_blocked(rule)
+            manual = _manual_flag_set(rule)
             if (not rule.get("auth_fill")
                     and (rule.get("auto_approve") or rule.get("default_key"))
                     and not AUTO_OFF_FLAG.exists()
+                    and not guarded and not manual
                     and not count_try(key, owner, rule["label"])):
                 break
 
@@ -1481,12 +1507,14 @@ def scan(rules: list[dict], seen: dict[str, float], streak: dict[str, int]) -> N
 
             says = dialog_text(owner) if not title else ""
 
-            guarded = _waiting_args_blocked(rule)
-            _record_op_callers(rule, guarded)
+            _record_op_callers(rule, guarded or ("manual_flag" if manual else None))
             if guarded:
                 log(f"{rule['label']}: waiting {rule.get('require_process')} "
                     f"names '{guarded}'; leaving the dialog for Nathan")
-            auto_off = AUTO_OFF_FLAG.exists() or bool(guarded)
+            elif manual:
+                log(f"{rule['label']}: {rule['manual_flag']} is set on this Mac; "
+                    "leaving the dialog for Nathan")
+            auto_off = AUTO_OFF_FLAG.exists() or bool(guarded) or manual
 
             if (rule.get("corner_click") and not auto_off
                     and _default_key_allowed(rule, owner)):

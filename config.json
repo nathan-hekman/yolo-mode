@@ -103,7 +103,8 @@
       "never_if_args": [
         "fidelity",
         "usaa"
-      ]
+      ],
+      "manual_flag": "~/.yolo_mode_op_manual"
     },
     {
       "owner": "1Password",
@@ -173,5 +174,6 @@
       "Chromium"
     ]
   },
-  "_never_if_args": "never_if_args on the 1Password CLI-access rule keeps the Authorize prompt manual (alert only) while any waiting `op` command's arguments mention Fidelity or USAA, case-insensitive. Nathan asked 2026-10-24. Limits: it sees only the command line, so an item fetched by UUID or through `op inject` with a template file is not caught, and a session already authorized by an earlier prompt raises no new dialog to hold back."
+  "_never_if_args": "never_if_args on the 1Password CLI-access rule keeps the Authorize prompt manual (alert only) while any waiting `op` command's arguments mention Fidelity or USAA, case-insensitive. Nathan asked 2026-10-24. Limits: it sees only the command line, so an item fetched by UUID or through `op inject` with a template file is not caught, and a session already authorized by an earlier prompt raises no new dialog to hold back.",
+  "_manual_flag": "manual_flag names a file that, while it exists on THIS Mac, keeps the rule's dialog manual (alert only, no click, no Return, no screen-look retry). The config travels between the Macs through git; the file does not, so one Mac can stop auto-approving while the other still needs it. Since 2026-10-24 n8server has ~/.yolo_mode_op_manual (no account-wide 1Password session without Nathan's Touch ID); n8bot waits on the AI clone's own service account. Remove the file to go back to auto-approve."
 }
