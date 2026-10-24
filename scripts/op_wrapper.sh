@@ -24,6 +24,7 @@ REAL=/opt/homebrew/bin/op
 TOKEN_FILE="$HOME/.config/yolo-mode/op-token"
 BOTS_ID=3lbnjdhid2owggk4eh3bzspqrq
 CLONE_TOKEN_FILE="$HOME/.config/nathan-ai-clone/op-token"
+CLONE_ID=bdhph7gzuek7ptigsyjc2tv7fa
 
 bots=0
 clone=0
@@ -33,17 +34,17 @@ shopt -s nocasematch
 for a in "$@"; do
   case "$a" in
     op://Bots/*|op://$BOTS_ID/*|--vault=Bots|--vault=$BOTS_ID) bots=1 ;;
-    op://nathan-ai-clone/*|--vault=nathan-ai-clone) clone=1 ;;
+    op://nathan-ai-clone/*|op://$CLONE_ID/*|--vault=nathan-ai-clone|--vault=$CLONE_ID) clone=1 ;;
   esac
   if [ "$prev" = "--vault" ]; then
-    case "$a" in Bots|$BOTS_ID) bots=1 ;; nathan-ai-clone) clone=1 ;; esac
+    case "$a" in Bots|$BOTS_ID) bots=1 ;; nathan-ai-clone|$CLONE_ID) clone=1 ;; esac
   fi
   prev="$a"
 done
 case "$1 $2" in
   "read "*|"inject "*|"item get"|"item list") read_only=1 ;;
   "vault get")
-    case "$3" in Bots|$BOTS_ID) bots=1; read_only=1 ;; nathan-ai-clone) clone=1; read_only=1 ;; esac ;;
+    case "$3" in Bots|$BOTS_ID) bots=1; read_only=1 ;; nathan-ai-clone|$CLONE_ID) clone=1; read_only=1 ;; esac ;;
 esac
 shopt -u nocasematch
 
