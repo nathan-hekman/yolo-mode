@@ -3,7 +3,9 @@
 
 Reads, in order:
   1. PUSHOVER_USER_KEY / PUSHOVER_API_TOKEN in the environment
-  2. ~/.config/yolo-mode/pushover.json  {"user_key": "...", "api_token": "..."}
+  2. ~/.config/pushover/env, the stack-wide 0600 file that ~/bin/pushover-creds
+     and scrape_common.pushover_creds keep current from 1Password (Bots vault)
+  3. ~/.config/yolo-mode/pushover.json  {"user_key": "...", "api_token": "..."}
 
 Returns ("", "") when neither is set, and callers skip the push rather than
 failing -- the app still works locally, it just cannot reach a phone.
@@ -19,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".config/yolo-mode/pushover.json"
+STACK_FILE = Path.home() / ".config/pushover/env"
 
 
 def pushover() -> tuple[str, str]:
@@ -26,6 +29,13 @@ def pushover() -> tuple[str, str]:
     token = os.environ.get("PUSHOVER_API_TOKEN", "")
     if user and token:
         return user, token
+    try:
+        vals = dict(line.strip().split("=", 1)
+                    for line in STACK_FILE.read_text().splitlines() if "=" in line)
+        if vals.get("PUSHOVER_USER_KEY") and vals.get("PUSHOVER_API_TOKEN"):
+            return vals["PUSHOVER_USER_KEY"], vals["PUSHOVER_API_TOKEN"]
+    except OSError:
+        pass
     try:
         data = json.loads(CONFIG_FILE.read_text())
         return data.get("user_key", ""), data.get("api_token", "")
