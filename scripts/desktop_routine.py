@@ -10,7 +10,8 @@ exists only inside sessions Desktop starts. So this script starts one:
   2. opens claude://code/new?q=<instruction> (prompt prefilled, default mode)
   3. presses "Trust workspace" if Desktop asks
   4. sets the model popup to Opus 5 and permissions to Bypass permissions
-  5. sends, presses "Allow once" if an approval still appears
+  5. presses Send (accessibility, so a locked screen or another app in front
+     does not matter), checks the box emptied, presses "Allow once" if asked
   6. checks scheduled-tasks.json for the id
 
 Every control is found by its accessibility name, not by screen position, so
@@ -149,6 +150,53 @@ def registry_has(task_id, fire_at=None, cron=None):
     return False
 
 
+def fire_at_too_close(fire_at, margin_s=180):
+    """True when a one-off's fireAt is in the past or under margin_s away.
+    Desktop's tool refuses a past fireAt, and the idle wait can run an hour."""
+    if not fire_at:
+        return False
+    import datetime
+    return datetime.datetime.fromisoformat(fire_at).timestamp() - time.time() < margin_s
+
+
+def prompt_text(app):
+    box = find(app, lambda r, t, d: r == "AXTextArea" and d == "Prompt")
+    return (ax(box, "AXValue") or "").strip() if box is not None else None
+
+
+def submit(app):
+    """Send the prefilled prompt and confirm the box emptied.
+
+    The Send button is pressed through accessibility, which needs no focus and
+    no keyboard. A System Events Enter goes to whatever app is in front, and
+    nowhere at all on a locked screen; that left the 2026-10-28 23:29
+    sellback-race-0929 instruction sitting unsent until Nathan found it the
+    next morning, past its fireAt. Enter stays as the fallback."""
+    for attempt in range(3):
+        send = find(app, lambda r, t, d: r == "AXButton" and d == "Send")
+        if send is not None:
+            press(send)
+        else:
+            NSWorkspace.sharedWorkspace().launchApplication_("Claude")
+            box = find(app, lambda r, t, d: r == "AXTextArea" and d == "Prompt")
+            if box is not None:
+                AXUIElementSetAttributeValue(box, "AXFocused", True)
+            time.sleep(0.5)
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to key code 36'])
+        for _ in range(10):
+            time.sleep(0.5)
+            if not prompt_text(app):
+                return True
+    return False
+
+
+def clear_draft(app):
+    """Empty the prompt box so an unsent instruction cannot be sent hours later."""
+    box = find(app, lambda r, t, d: r == "AXTextArea" and d == "Prompt")
+    if box is not None:
+        AXUIElementSetAttributeValue(box, "AXValue", "")
+
+
 def skill_body(path):
     text = open(os.path.expanduser(path)).read()
     if text.startswith("---"):
@@ -174,15 +222,13 @@ def main():
         print("off: Create routines through Desktop is unchecked in YOLO Mode")
         sys.exit(3)
 
+    if fire_at_too_close(a.fire_at):
+        print(f"{a.id}: fireAt {a.fire_at} is past or under 3 min away; NOT registered")
+        sys.exit(1)
+
     prompt = a.prompt or skill_body(a.from_skill)
     sched = f'fireAt "{a.fire_at}"' if a.fire_at else f'cronExpression "{a.cron}"'
     title = f', title "{a.title}"' if a.title else ""
-    instruction = (
-        f"Use your create_scheduled_task tool to create a LOCAL scheduled task (not a cloud "
-        f"or remote routine). taskId \"{a.id}\"{title}, {sched}. Use the text between the "
-        f"markers below, verbatim, as the task prompt. Do nothing else; reply with the tool "
-        f"result.\n<<<PROMPT\n{prompt}\nPROMPT>>>"
-    )
 
     end = time.time() + a.max_wait
     while idle_seconds() < a.idle:
@@ -190,6 +236,38 @@ def main():
             print("gave up: user never idle")
             sys.exit(2)
         time.sleep(5)
+    if fire_at_too_close(a.fire_at):
+        print(f"{a.id}: fireAt {a.fire_at} passed while waiting for idle; NOT registered")
+        sys.exit(1)
+
+    # Desktop's tool refuses an id whose folder already exists, and callers
+    # often write the shim there first (desktop-routine-folder-collision).
+    # The body is already read, so park the folder and put it back on failure.
+    task_dir = f"{HOME}/.claude/scheduled-tasks/{a.id}"
+    parked = None
+    if os.path.isdir(task_dir) and not registry_has(a.id):
+        os.makedirs(f"{HOME}/.claude/scheduled-tasks-parked", exist_ok=True)
+        parked = f"{HOME}/.claude/scheduled-tasks-parked/{a.id}-{int(time.time())}"
+        os.rename(task_dir, parked)
+
+    def fail(msg):
+        if parked and not os.path.exists(task_dir):
+            os.rename(parked, task_dir)
+        print(msg)
+        sys.exit(1)
+
+    # A draft that never sends can still be sent by hand much later; tell the
+    # session to refuse once the request is stale.
+    import datetime
+    deadline = datetime.datetime.now().astimezone() + datetime.timedelta(minutes=30)
+    instruction = (
+        f"Use your create_scheduled_task tool to create a LOCAL scheduled task (not a cloud "
+        f"or remote routine). taskId \"{a.id}\"{title}, {sched}. Use the text between the "
+        f"markers below, verbatim, as the task prompt. Do nothing else; reply with the tool "
+        f"result. This request expires at {deadline.isoformat(timespec='minutes')}: if it is "
+        f"later than that now, create nothing and reply only EXPIRED."
+        f"\n<<<PROMPT\n{prompt}\nPROMPT>>>"
+    )
 
     if claude_pid() is None:
         subprocess.run(["open", "-a", "Claude"])
@@ -204,30 +282,31 @@ def main():
         time.sleep(1.5)
 
     if wait_for(app, lambda r, t, d: r == "AXTextArea" and d == "Prompt", 10) is None:
-        print("no prompt box found")
-        sys.exit(1)
-    if find(app, lambda r, t, d: r == "AXPopUpButton" and d == f"Model: {MODEL}") is None:
+        fail("no prompt box found")
+    if find(app, lambda r, t, d: r == "AXPopUpButton" and d.startswith(f"Model: {MODEL}")) is None:
         choose(app, lambda r, t, d: r == "AXPopUpButton" and d.startswith("Model: "), MODEL)
-    if find(app, lambda r, t, d: r == "AXPopUpButton" and t == PERMISSION) is None:
-        choose(app, lambda r, t, d: r == "AXPopUpButton" and t in
-               ("Manual", "Ask permissions", "Accept edits", "Plan mode", "Auto"), PERMISSION)
+    # Desktop moved the permission name from the title to "Permissions: <mode>".
+    if find(app, lambda r, t, d: r == "AXPopUpButton" and PERMISSION in (t, d.removeprefix("Permissions: "))) is None:
+        choose(app, lambda r, t, d: r == "AXPopUpButton" and (d.startswith("Permissions: ") or t in
+               ("Manual", "Ask permissions", "Accept edits", "Plan mode", "Auto")), PERMISSION)
 
-    box = find(app, lambda r, t, d: r == "AXTextArea" and d == "Prompt")
-    AXUIElementSetAttributeValue(box, "AXFocused", True)
-    time.sleep(0.3)
-    subprocess.run(["osascript", "-e", 'tell application "System Events" to key code 36'])
+    if not submit(app):
+        clear_draft(app)
+        fail(f"{a.id}: prompt never sent (Send button and Enter both failed); draft cleared; NOT registered")
 
     end = time.time() + 180
     while time.time() < end:
         if registry_has(a.id, a.fire_at, a.cron):
+            if parked:
+                import shutil
+                shutil.rmtree(parked, ignore_errors=True)
             print(f"{a.id}: registered by Desktop")
             sys.exit(0)
         allow = find(app, lambda r, t, d: r == "AXButton" and (t + d).startswith("Allow once"))
         if allow is not None:
             press(allow)
         time.sleep(2)
-    print(f"{a.id}: NOT registered")
-    sys.exit(1)
+    fail(f"{a.id}: NOT registered (prompt was sent; read the Desktop session it opened)")
 
 
 if __name__ == "__main__":
