@@ -26,9 +26,14 @@ existing shim's body is passed as the prompt (--from-skill) rather than kept.
 Usage:
   desktop_routine.py <id> --fire-at 2026-09-25T09:00:00-05:00 --from-skill PATH
   desktop_routine.py <id> --cron "7 9 * * *" --prompt "..." --title "..."
-Exit 0 = registered, 1 = not registered, 2 = gave up waiting for idle,
-3 = switched off in the YOLO Mode menu (~/.yolo_mode_no_desktop_routine);
-callers then fall back to scrape-collection/scripts/add_scheduled_task.py.
+When Desktop does not take it (switched off in the YOLO Mode menu, the user
+never idle, the prompt never sent, or no registry entry after 180s), the
+routine goes to launchd instead: a LaunchAgent com.nathanhekman.routine.<id>
+runs scripts/run_routine.sh, which opens the same detached Opus session.
+--launchd skips Desktop entirely. Log: ~/Library/Logs/yolo-routines.log.
+Exit 0 = registered (Desktop or launchd), 1/2/3 = registered nowhere.
+Do not fall back to add_scheduled_task.py: it SIGTERMs Desktop and every
+session under it.
 """
 from __future__ import annotations
 
@@ -197,6 +202,88 @@ def clear_draft(app):
         AXUIElementSetAttributeValue(box, "AXValue", "")
 
 
+def cron_to_calendar(cron):
+    """5-field cron -> launchd StartCalendarInterval dicts, or None if a field
+    uses syntax this does not cover. Lists, ranges and */n are expanded."""
+    keys = ["Minute", "Hour", "Day", "Month", "Weekday"]
+    spans = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+    fields = cron.split()
+    if len(fields) != 5:
+        return None
+    per = []
+    for f, (lo, hi) in zip(fields, spans):
+        if f == "*":
+            per.append([None])
+            continue
+        vals = set()
+        for part in f.split(","):
+            step = 1
+            if "/" in part:
+                part, st = part.split("/", 1)
+                if not st.isdigit():
+                    return None
+                step = int(st)
+            if part == "*":
+                a, b = lo, hi
+            elif "-" in part:
+                x, y = part.split("-", 1)
+                if not (x.isdigit() and y.isdigit()):
+                    return None
+                a, b = int(x), int(y)
+            elif part.isdigit():
+                a = b = int(part)
+            else:
+                return None
+            vals.update(range(a, b + 1, step))
+        per.append(sorted(vals))
+    import itertools
+    out = []
+    for combo in itertools.product(*per):
+        out.append({k: v for k, v in zip(keys, combo) if v is not None})
+    return out if len(out) <= 500 else None
+
+
+def install_launchd(task_id, prompt, fire_at=None, cron=None):
+    """Fallback when Desktop will not take the routine: a LaunchAgent that runs
+    scripts/run_routine.sh, which opens the same detached Opus session Desktop
+    would. launchd runs whether or not Desktop is open, and catches up a missed
+    calendar time on wake. Returns a status line, or None if it cannot."""
+    import datetime
+    import plistlib
+    if fire_at:
+        when = datetime.datetime.fromisoformat(fire_at).astimezone()
+        cal = [{"Month": when.month, "Day": when.day, "Hour": when.hour, "Minute": when.minute}]
+        extra = [str(int(when.timestamp()))]
+    else:
+        cal = cron_to_calendar(cron)
+        extra = []
+        if not cal:
+            return None
+    task_dir = f"{HOME}/.claude/scheduled-tasks/{task_id}"
+    os.makedirs(task_dir, exist_ok=True)
+    skill = f"{task_dir}/SKILL.md"
+    if not os.path.exists(skill):
+        with open(skill, "w") as fh:
+            fh.write(f"---\nname: {task_id}\ndescription: launchd fallback routine\n---\n\n{prompt}\n")
+    label = f"com.nathanhekman.routine.{task_id}"
+    plist = f"{HOME}/Library/LaunchAgents/{label}.plist"
+    runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_routine.sh")
+    with open(plist, "wb") as fh:
+        plistlib.dump({
+            "Label": label,
+            "ProgramArguments": ["/bin/bash", runner, task_id, *extra],
+            "StartCalendarInterval": cal if len(cal) > 1 else cal[0],
+            "StandardOutPath": f"{HOME}/Library/Logs/yolo-routines.log",
+            "StandardErrorPath": f"{HOME}/Library/Logs/yolo-routines.log",
+        }, fh)
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
+    r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", plist], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return f"{task_id}: registered via launchd fallback ({label})"
+
+
 def skill_body(path):
     text = open(os.path.expanduser(path)).read()
     if text.startswith("---"):
@@ -216,29 +303,40 @@ def main():
     ap.add_argument("--title")
     ap.add_argument("--idle", type=int, default=60, help="seconds of user idle required first")
     ap.add_argument("--max-wait", type=int, default=3600, help="give up after this long without idle")
+    ap.add_argument("--launchd", action="store_true", help="skip Desktop, register with launchd directly")
     a = ap.parse_args()
-
-    if os.path.exists(f"{HOME}/.yolo_mode_no_desktop_routine"):
-        print("off: Create routines through Desktop is unchecked in YOLO Mode")
-        sys.exit(3)
 
     if fire_at_too_close(a.fire_at):
         print(f"{a.id}: fireAt {a.fire_at} is past or under 3 min away; NOT registered")
         sys.exit(1)
 
     prompt = a.prompt or skill_body(a.from_skill)
+
+    def fallback(reason, code=1):
+        """Desktop did not take it: hand the routine to launchd instead."""
+        print(reason)
+        if fire_at_too_close(a.fire_at, 60):
+            print(f"{a.id}: fireAt {a.fire_at} too close for launchd too; NOT registered")
+            sys.exit(code)
+        done = install_launchd(a.id, prompt, a.fire_at, a.cron)
+        if done:
+            print(done)
+            sys.exit(0)
+        print(f"{a.id}: launchd fallback failed too (cron syntax or launchctl); NOT registered")
+        sys.exit(code)
+
+    if a.launchd or os.path.exists(f"{HOME}/.yolo_mode_no_desktop_routine"):
+        fallback("Desktop path skipped (--launchd, or switched off in YOLO Mode)", 3)
     sched = f'fireAt "{a.fire_at}"' if a.fire_at else f'cronExpression "{a.cron}"'
     title = f', title "{a.title}"' if a.title else ""
 
     end = time.time() + a.max_wait
     while idle_seconds() < a.idle:
         if time.time() > end:
-            print("gave up: user never idle")
-            sys.exit(2)
+            fallback("gave up waiting for idle", 2)
         time.sleep(5)
     if fire_at_too_close(a.fire_at):
-        print(f"{a.id}: fireAt {a.fire_at} passed while waiting for idle; NOT registered")
-        sys.exit(1)
+        fallback(f"{a.id}: fireAt {a.fire_at} is near after the idle wait; skipping Desktop")
 
     # Desktop's tool refuses an id whose folder already exists, and callers
     # often write the shim there first (desktop-routine-folder-collision).
@@ -253,8 +351,10 @@ def main():
     def fail(msg):
         if parked and not os.path.exists(task_dir):
             os.rename(parked, task_dir)
-        print(msg)
-        sys.exit(1)
+        if registry_has(a.id, a.fire_at, a.cron):  # Desktop got there late
+            print(f"{a.id}: registered by Desktop")
+            sys.exit(0)
+        fallback(msg)
 
     # A draft that never sends can still be sent by hand much later; tell the
     # session to refuse once the request is stale.
