@@ -264,6 +264,18 @@ def main() -> int:
         )
         return 0
 
+    # n8bot sessions asking Nathan a question (AskUserQuestion) are not
+    # approvals, and n8bot is not in the critical path: he answers them when
+    # he next opens the session. Their push woke er-doctor triage on
+    # 2026-11-07 (00b8cba440b7) because the question said "fail". Nathan,
+    # 2026-11-07: "stop the pushover of those on n8bot". Logged, not pushed.
+    if (tool or {}).get("name") == "AskUserQuestion" and secrets.device() == "n8bot":
+        eventlog.record(
+            "question", "AskUserQuestion", source="claude", project=where,
+            detail=request, pushed=False, session=session_id,
+        )
+        return 0
+
     if tool is not None:
         headline, detail = describe(tool)
         dedupe_key = f"{session}|{tool.get('id')}"
