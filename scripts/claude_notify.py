@@ -264,12 +264,12 @@ def main() -> int:
         )
         return 0
 
-    # n8bot sessions asking Nathan a question (AskUserQuestion) are not
-    # approvals, and n8bot is not in the critical path: he answers them when
-    # he next opens the session. Their push woke er-doctor triage on
-    # 2026-11-07 (00b8cba440b7) because the question said "fail". Nathan,
-    # 2026-11-07: "stop the pushover of those on n8bot". Logged, not pushed.
-    if (tool or {}).get("name") == "AskUserQuestion" and secrets.device() == "n8bot":
+    # A session asking Nathan a question (AskUserQuestion) is not a tool
+    # approval, on either Mac. Its push woke er-doctor triage on 2026-11-07
+    # (00b8cba440b7) because the question said "fail". Nathan, 2026-11-07:
+    # "Just stop it from sending pushovers of Claude asks. Fine to send for
+    # actual approval." Logged, not pushed; real permission prompts still push.
+    if (tool or {}).get("name") == "AskUserQuestion":
         eventlog.record(
             "question", "AskUserQuestion", source="claude", project=where,
             detail=request, pushed=False, session=session_id,
