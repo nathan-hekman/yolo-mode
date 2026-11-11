@@ -243,6 +243,21 @@ def cron_to_calendar(cron):
     return out if len(out) <= 500 else None
 
 
+TCC_RUNNER = os.path.expanduser("~/yolo-mode/runner/routine-runner")
+
+
+def _tcc_prefix():
+    """Start the job through routine-runner when it exists.
+
+    launchd jobs are judged by macOS privacy (TCC) by their program, and
+    /bin/bash has no ~/Documents access. routine-runner holds a Full Disk
+    Access grant (Nathan, 2026-11-11), so the job and anything it opens can
+    read ~/Documents. Missing binary: plain bash, and run_routine.sh's
+    .command launch still works.
+    """
+    return [TCC_RUNNER] if os.access(TCC_RUNNER, os.X_OK) else []
+
+
 def install_launchd(task_id, prompt, fire_at=None, cron=None):
     """Fallback when Desktop will not take the routine: a LaunchAgent that runs
     scripts/run_routine.sh, which opens the same detached Opus session Desktop
@@ -271,7 +286,7 @@ def install_launchd(task_id, prompt, fire_at=None, cron=None):
     with open(plist, "wb") as fh:
         plistlib.dump({
             "Label": label,
-            "ProgramArguments": ["/bin/bash", runner, task_id, *extra],
+            "ProgramArguments": [*_tcc_prefix(), "/bin/bash", runner, task_id, *extra],
             "StartCalendarInterval": cal if len(cal) > 1 else cal[0],
             "StandardOutPath": f"{HOME}/Library/Logs/yolo-routines.log",
             "StandardErrorPath": f"{HOME}/Library/Logs/yolo-routines.log",
