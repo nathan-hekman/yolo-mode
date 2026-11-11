@@ -387,6 +387,10 @@ def main():
     if claude_pid() is None:
         subprocess.run(["open", "-a", "Claude"])
         time.sleep(8)
+    # A Desktop that never came up used to raise in app_element() and leave the
+    # task folder parked, so the launchd fallback then found no SKILL.md.
+    if claude_pid() is None:
+        fail(f"{a.id}: Claude Desktop is not running")
     app = app_element()
     url = "claude://code/new?" + urllib.parse.urlencode({"q": instruction})
     subprocess.run(["open", url])
