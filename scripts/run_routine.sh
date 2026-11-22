@@ -49,6 +49,20 @@ if [[ ! -f "$skill" ]]; then
   exit 1
 fi
 
+# A THIN SHIM brief with exactly one ```bash block is only a guard plus a
+# launcher call. Claude Desktop ran that block itself and opened no session
+# for it; do the same here, so a shim no longer costs a Remote Control session
+# of its own (every launchd shim did from 2026-11-11 to 2026-11-21, and a
+# weekend skip opened a session only to read "weekend — skip"). Any other brief
+# still gets a Claude session that reads it.
+shim=""
+if grep -q 'THIN SHIM' "$skill" && [[ "$(grep -c '^```bash' "$skill")" == 1 ]]; then
+  shim="$HOME/yolo-mode/state/routines/$tid.shim.sh"
+  mkdir -p "$(dirname "$shim")"
+  awk '/^```bash/{f=1;next} f&&/^```/{exit} f' "$skill" >"$shim"
+  [[ -s "$shim" ]] || shim=""
+fi
+
 prompt="Read $skill in full, then do what it says. You are the scheduled run of routine $tid, fired by launchd because Claude Desktop did not take the registration."
 
 # How the session gets started, and why not an AppleScript Terminal tab:
@@ -70,6 +84,16 @@ out="$state/$tid.out"
 
 attempt() {
   rm -f "$out"
+  if [[ -n "$shim" ]]; then
+    cat >"$runner" <<EOF
+#!/bin/bash
+cd "\$HOME"
+bash $(printf '%q' "$shim") >"$out.tmp" 2>&1
+echo "rc=\$?" >>"$out.tmp"
+mv "$out.tmp" "$out"
+exit
+EOF
+  else
   cat >"$runner" <<EOF
 #!/bin/bash
 cd "\$HOME"
@@ -78,6 +102,7 @@ echo "rc=\$?" >>"$out.tmp"
 mv "$out.tmp" "$out"
 exit
 EOF
+  fi
   chmod +x "$runner"
   open -a Terminal "$runner" >>"$log" 2>&1 || { say "open -a Terminal failed"; return 1; }
   for _ in $(seq 1 150); do
@@ -89,18 +114,33 @@ EOF
     say "fired: $(grep -m1 '^launched' "$out")"
     return 0
   fi
+  if [[ -n "$shim" ]]; then
+    # The shim ran. rc=0 without "launched" is its own guard saying skip.
+    # A failing shim already sent its own push; do not rerun it (a second
+    # run could open a second session).
+    if grep -q '^rc=0$' "$out"; then
+      say "fired: shim ran, no session: $(grep -v '^rc=' "$out" | tr '\n' ' ' | cut -c1-200)"
+      return 0
+    fi
+    say "shim failed: $(tr '\n' ' ' <"$out" | cut -c1-300)"
+    return 2
+  fi
   say "launch failed: $(tr '\n' ' ' <"$out" | cut -c1-300)"
   return 1
 }
 
-if attempt || { sleep 60; attempt; }; then
+attempt; rc=$?
+if (( rc == 1 )); then sleep 60; attempt; rc=$?; fi
+if (( rc == 0 )); then
   [[ -n "$once" ]] && remove_self
   exit 0
 fi
 
 eval "$("$HOME/bin/pushover-creds")"
 why="$(tail -2 "$log" | tr '\n' ' ' | cut -c1-400)"
-msg="$("$HOME/bin/push-link" yolo-mode "Routine $tid did not start after 2 tries. Nothing ran. $why Log: ~/Library/Logs/yolo-routines.log")"
+what="did not start after 2 tries. Nothing ran."
+(( rc == 2 )) && what="ran its shim, and the shim failed."
+msg="$("$HOME/bin/push-link" yolo-mode "Routine $tid $what $why Log: ~/Library/Logs/yolo-routines.log")"
 curl -s -m 20 --form-string "token=$PUSHOVER_APP_TOKEN" --form-string "user=$PUSHOVER_USER_KEY" \
   --form-string "priority=1" \
   --form-string "title=routine $tid did not start" --form-string "message=$msg" \
